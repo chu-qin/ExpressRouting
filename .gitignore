@@ -1,0 +1,29 @@
+# Build outputs
+build/
+output/
+*.exe
+*.o
+*.obj
+*.moc
+*.ui
+
+# Qt autogen
+*_autogen/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+.ninja_deps
+.ninja_log
+build.ninja
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.pro.user*
+.qmake.stash
+
+# OS
+.DS_Store
+Thumbs.db
