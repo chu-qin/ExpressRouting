@@ -16,10 +16,11 @@ Makefile
 .ninja_deps
 .ninja_log
 build.ninja
+*.cbp
+*.cmake
 
 # IDE
 .vs/
-.vscode/
 *.user
 *.pro.user*
 .qmake.stash
@@ -27,3 +28,7 @@ build.ninja
 # OS
 .DS_Store
 Thumbs.db
+
+# Logs
+logs/
+*.log

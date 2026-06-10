@@ -1,587 +1,900 @@
-#include "mainwindow.h"
+// ============================================================================
+// MainWindow.cpp — Qt 图形界面完整实现
+// ============================================================================
+// 本文件包含：
+//   GraphWidget  — 交互式路网画布（paintEvent + mouseMoveEvent + mousePressEvent）
+//   MainWindow  — 主窗口（菜单栏 + 导航面板 + 画布 + 日志 + 状态栏）
+//
+// 关键 Qt 机制：
+//   信号槽    connect(btn, &QPushButton::clicked, this, &MainWindow::slotFn)
+//   事件重写  paintEvent / mouseMoveEvent / mousePressEvent
+//   对话框    QDialog + QFormLayout + QDialogButtonBox（标准 Qt 模式）
+//   文件选择  QFileDialog::getOpenFileName / getSaveFileName
+// ============================================================================
 
-// =====================================================================
-// GraphWidget::paintEvent — 图绘制核心（每次 update() 时被 Qt 调用）
-// =====================================================================
-// 绘制顺序（背景→边→高亮→节点）决定了图层叠放关系：
-//   先画的在底层，后画的在上层。
-//   所以节点画在最后——始终盖在边和路径上面。
-// =====================================================================
+#include "MainWindow.h"
+#include "Dijkstra.h"
+
+#include <QPainter>
+#include <QMouseEvent>
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QPushButton>
+#include <QDialog>
+#include <QFormLayout>
+#include <QDialogButtonBox>
+#include <QSpinBox>
+#include <QDoubleSpinBox>
+#include <QLineEdit>
+#include <QComboBox>
+#include <QFileDialog>
+#include <QMenuBar>
+#include <QStatusBar>
+#include <QScrollBar>
+#include <cmath>
+#include <sstream>
+#include <iomanip>
+
+// ============================================================================
+// GraphWidget — 交互式路网画布
+// ============================================================================
+
+GraphWidget::GraphWidget(QWidget* parent) : QWidget(parent) {
+    setMouseTracking(true);          // 启用鼠标追踪（不需要按下就能触发 moveEvent）
+    setMinimumSize(500, 400);
+}
+
+void GraphWidget::setGraph(const Graph* g) { g_ = g; updatePos(); update(); }
+
+void GraphWidget::setHL(const DynArray<int>& nodes, const DynArray<int>& edgeSrc,
+                         const DynArray<int>& edgeDst, int src, int dst) {
+    hlNodes_ = nodes; hlEdgeSrc_ = edgeSrc; hlEdgeDst_ = edgeDst;
+    srcHL_ = src; dstHL_ = dst;
+    update();
+}
+
+void GraphWidget::clearHL() {
+    hlNodes_.clear(); hlEdgeSrc_.clear(); hlEdgeDst_.clear();
+    srcHL_ = dstHL_ = -1;
+    update();
+}
+
+// ---- 坐标计算：经纬度 → 屏幕坐标 ----
+void GraphWidget::updatePos() {
+    if (!g_ || g_->nodeCount() == 0) return;
+
+    // 收集所有节点的经纬度，找 min/max
+    DynArray<int> ids = g_->getAllNodeIds();
+    double minLon = 1e9, maxLon = -1e9, minLat = 1e9, maxLat = -1e9;
+    bool hasGeo = false;
+    for (int i = 0; i < ids.size(); ++i) {
+        const Node* n = g_->findNode(ids[i]);
+        if (n && (n->lon != 0 || n->lat != 0)) {
+            hasGeo = true;
+            if (n->lon < minLon) minLon = n->lon;
+            if (n->lon > maxLon) maxLon = n->lon;
+            if (n->lat < minLat) minLat = n->lat;
+            if (n->lat > maxLat) maxLat = n->lat;
+        }
+    }
+
+    // 如果没有坐标数据，均匀分布
+    if (!hasGeo) { minLon = 0; maxLon = 100; minLat = 0; maxLat = 100; }
+
+    float margin = 40.0f;
+    float W = width() - 2 * margin;
+    float H = height() - 2 * margin;
+    if (W < 1 || H < 1) return;
+
+    float rangeX = maxLon - minLon;
+    float rangeY = maxLat - minLat;
+    if (rangeX < 0.01f) rangeX = 1.0f;
+    if (rangeY < 0.01f) rangeY = 1.0f;
+
+    for (int i = 0; i < ids.size(); ++i) {
+        const Node* n = g_->findNode(ids[i]);
+        if (!n) continue;
+        float fx = (n->lon != 0 || n->lat != 0)
+            ? margin + (n->lon - minLon) / rangeX * W
+            : margin + (float)(ids[i] * 37 % (int)W);
+        float fy = (n->lon != 0 || n->lat != 0)
+            ? margin + H - (n->lat - minLat) / rangeY * H  // 纬度大=上方，屏幕 y 小=上方
+            : margin + (float)(ids[i] * 53 % (int)H);
+        pos_.set(ids[i], QPointF(fx, fy));
+    }
+}
+
+void GraphWidget::resizeEvent(QResizeEvent*) { updatePos(); }
+
+// ---- 高亮判断 ----
+bool GraphWidget::isNodeHL(int id) const {
+    for (int i = 0; i < hlNodes_.size(); ++i)
+        if (hlNodes_[i] == id) return true;
+    return false;
+}
+
+bool GraphWidget::isEdgeHL(int f, int t) const {
+    for (int i = 0; i < hlEdgeSrc_.size(); ++i)
+        if (hlEdgeSrc_[i] == f && hlEdgeDst_[i] == t) return true;
+    return false;
+}
+
+// ---- 鼠标坐标 → 节点（距离 < R+4 像素即为命中） ----
+int GraphWidget::nodeAt(QPoint p) const {
+    if (!g_) return -1;
+    DynArray<int> ids = g_->getAllNodeIds();
+    for (int i = 0; i < ids.size(); ++i) {
+        const QPointF* q = pos_.find(ids[i]);
+        if (!q) continue;
+        float dx = p.x() - q->x(), dy = p.y() - q->y();
+        if (std::sqrt(dx * dx + dy * dy) <= R + 4) return ids[i];
+    }
+    return -1;
+}
+
+// ---- 画边（箭头 + 偏移处理双向边） ----
+void GraphWidget::drawEdge(QPainter& p, QPointF a, QPointF b, QColor col, float w, bool bi) {
+    QPointF d = b - a;
+    float len = std::sqrt(d.x() * d.x() + d.y() * d.y());
+    if (len < 1) return;
+
+    QPointF u(d.x() / len, d.y() / len);        // 方向单位向量
+    QPointF perp(-u.y(), u.x());                 // 垂直方向（用于双向边偏移）
+
+    float off = bi ? 5.0f : 0;                    // 双向边偏移量
+    QPointF p1 = a + u * R + perp * off;          // 起点：圆边缘
+    QPointF p2 = b - u * R + perp * off;          // 终点：圆边缘
+
+    // 画线段
+    p.setPen(QPen(col, w));
+    p.drawLine(p1, p2);
+
+    // 画箭头（三角形，边长 10px）
+    float sz = 10.0f;
+    QPolygonF tri;
+    tri << p2
+        << (p2 - u * sz + perp * (sz * 0.42f))
+        << (p2 - u * sz - perp * (sz * 0.42f));
+    p.setPen(Qt::NoPen);
+    p.setBrush(col);
+    p.drawPolygon(tri);
+}
+
+// ---- 画节点（渐变圆 + 阴影 + 编号 + 名称） ----
+void GraphWidget::drawNode(QPainter& p, int id, QPointF pos, QColor col) {
+    // 阴影（右下偏移 2px）
+    p.setPen(Qt::NoPen);
+    p.setBrush(QColor(0, 0, 0, 45));
+    p.drawEllipse(pos + QPointF(2, 2), (double)R + 2, (double)R + 2);
+
+    // 主体圆
+    p.setPen(QPen(Qt::white, 1.5));
+    p.setBrush(col);
+    p.drawEllipse(pos, (double)R, (double)R);
+
+    // 编号（白色加粗居中）
+    QFont f = p.font();
+    f.setPointSize(10);
+    f.setBold(true);
+    p.setFont(f);
+    p.setPen(Qt::white);
+    p.drawText(QRectF(pos.x() - R, pos.y() - R, R * 2, R * 2), Qt::AlignCenter, QString::number(id));
+
+    // 名称标签（圆下方）
+    if (g_) {
+        const Node* n = g_->findNode(id);
+        if (n && !n->name.empty()) {
+            QString nm = QString::fromStdString(n->name);
+            f.setPointSize(8);
+            f.setBold(false);
+            p.setFont(f);
+            p.setPen(QColor(30, 45, 60));
+            p.drawText(QRectF(pos.x() - 45, pos.y() + R + 2, 90, 30),
+                       Qt::AlignHCenter | Qt::TextWordWrap, nm);
+        }
+    }
+}
+
+// ---- 主绘制 ----
 void GraphWidget::paintEvent(QPaintEvent*) {
-    QPainter p(this);                         // 创建画笔
-    p.setRenderHint(QPainter::Antialiasing);   // 开启抗锯齿（让线更平滑）
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.fillRect(rect(), QColor(240, 245, 250));
 
-    if (!mgr) return;                         // 没数据就不画
-    ExpressGraph* g = mgr->getGraph();
-    int N = g->getNodeCount();
-    if (N == 0) return;
-
-    // -------------------------------------------------------
-    // 第一步：扫描所有节点的 X/Y 坐标，找出最小/最大值
-    //   用于计算"真实坐标→屏幕像素"的映射比例
-    // -------------------------------------------------------
-    double xMin = INF, xMax = -INF, yMin = INF, yMax = -INF;
-    for (int i = 0; i < N; i++) {
-        double x = g->getNodeX(i);
-        double y = g->getNodeY(i);
-        if (x < xMin) xMin = x;
-        if (x > xMax) xMax = x;
-        if (y < yMin) yMin = y;
-        if (y > yMax) yMax = y;
-    }
-    // 防止除零：如果所有点坐标相同，设一个默认范围
-    if (xMax - xMin < 1) xMax = xMin + 1;
-    if (yMax - yMin < 1) yMax = yMin + 1;
-
-    // -------------------------------------------------------
-    // 第二步：计算缩放比例（保持宽高比，留 55px 边距）
-    // -------------------------------------------------------
-    const int M = 55;                         // 边距（留白）
-    int W = width();                          // 控件的像素宽度
-    int H = height();                         // 控件的像素高度
-    double scaleX = (W - 2.0 * M) / (xMax - xMin);
-    double scaleY = (H - 2.0 * M) / (yMax - yMin);
-    double scale  = scaleX < scaleY ? scaleX : scaleY;  // 取较小值，保证不超出
-
-    // 世界坐标 → 屏幕像素 的转换函数（Lambda 表达式）
-    auto toX = [&](double wx) { return M + (wx - xMin) * scale; };
-    auto toY = [&](double wy) { return M + (wy - yMin) * scale; };
-
-    // 预计算所有节点的屏幕坐标（避免后面重复计算）
-    double* sx = new double[N];
-    double* sy = new double[N];
-    for (int i = 0; i < N; i++) {
-        sx[i] = toX(g->getNodeX(i));
-        sy[i] = toY(g->getNodeY(i));
+    if (!g_ || g_->nodeCount() == 0) {
+        p.setPen(QColor(150, 160, 170));
+        p.drawText(rect(), Qt::AlignCenter, "（路网为空，请导入数据）");
+        return;
     }
 
-    // -------------------------------------------------------
-    // 第三步：画背景网格（浅灰色，间距 40px）
-    //   模仿地图或专业绘图工具的网格背景
-    // -------------------------------------------------------
-    p.setPen(QPen(QColor(240, 240, 240), 1));
-    for (int gx = M; gx < W - M; gx += 40)
-        p.drawLine(gx, M, gx, H - M);
-    for (int gy = M; gy < H - M; gy += 40)
-        p.drawLine(M, gy, W - M, gy);
+    DynArray<int> ids = g_->getAllNodeIds();
 
-    // -------------------------------------------------------
-    // 第四步：画所有有向边（灰色线 + 箭头 + 边权数字）
-    //   遍历整个邻接矩阵，mat[i][j] != INF 说明 i→j 有边
-    // -------------------------------------------------------
-    p.setFont(QFont("Consolas", 7));          // 边权数字用等宽小字
+    // 1. 画所有边
+    for (int i = 0; i < ids.size(); ++i) {
+        const QPointF* pa = pos_.find(ids[i]);
+        if (!pa) continue;
 
-    for (int i = 0; i < N; i++) {
-        for (int j = 0; j < N; j++) {
-            double w = g->getWeight(i, j);
-            if (w == INF) continue;           // 无边，跳过
+        const DynArray<Edge>& ns = g_->getNeighbors(ids[i]);
+        for (int j = 0; j < ns.size(); ++j) {
+            const QPointF* pb = pos_.find(ns[j].to);
+            if (!pb) continue;
 
-            double x1 = sx[i], y1 = sy[i];    // 起点屏幕坐标
-            double x2 = sx[j], y2 = sy[j];    // 终点屏幕坐标
+            // 检查是否为双向边
+            bool bi = false;
+            const DynArray<Edge>& rev = g_->getNeighbors(ns[j].to);
+            for (int k = 0; k < rev.size(); ++k)
+                if (rev[k].to == ids[i]) { bi = true; break; }
 
-            // 判断这条边是否属于高亮路径的一段
-            bool onHL = false;
-            for (int k = 0; k < highlight.getSize() - 1; k++) {
-                if (highlight[k] == i && highlight[k + 1] == j) {
-                    onHL = true;
-                    break;
+            bool hl = isEdgeHL(ids[i], ns[j].to);
+            drawEdge(p, *pa, *pb,
+                     hl ? QColor(230, 100, 30) : QColor(160, 180, 200, 180),
+                     hl ? 3.0f : 1.5f, bi);
+
+            // 边权标签（中点偏移处显示 耗时/费用）
+            if (!hl) {
+                QPointF mid = (*pa + *pb) / 2.0;
+                QPointF d = *pb - *pa;
+                QPointF perp(-d.y(), d.x());
+                float plen = std::sqrt(perp.x() * perp.x() + perp.y() * perp.y());
+                if (plen > 0) {
+                    perp = QPointF(perp.x() / plen * 12, perp.y() / plen * 12);
+                    QFont sf = p.font(); sf.setPointSize(7); p.setFont(sf);
+                    p.setPen(QColor(100, 120, 140));
+                    p.drawText(QRectF(mid.x() + perp.x() - 30, mid.y() + perp.y() - 10, 60, 20),
+                               Qt::AlignCenter,
+                               QString("%1h/%2").arg(ns[j].time, 0, 'f', 1).arg(ns[j].cost, 0, 'f', 0));
                 }
             }
-
-            if (!onHL) {
-                // ---- 普通边：灰色细线 ----
-                p.setPen(QPen(QColor(190, 190, 190), 0.8));
-                p.drawLine(QPointF(x1, y1), QPointF(x2, y2));
-            }
-            // 注：高亮边不在这里画，等第五步统一画红色粗线
-
-            // ---- 画箭头（三角形，方向指向终点） ----
-            double ang = atan2(y2 - y1, x2 - x1);  // 线段角度
-            double asz = 8;                         // 箭头大小
-            QPointF tip(x2, y2);
-            // 箭头的两条"翅膀"：从 tip 向两侧偏移 0.5 弧度
-            QPointF al(x2 - asz * cos(ang - 0.5), y2 - asz * sin(ang - 0.5));
-            QPointF ar(x2 - asz * cos(ang + 0.5), y2 - asz * sin(ang + 0.5));
-            p.drawLine(tip, al);
-            p.drawLine(tip, ar);
-
-            // ---- 画边权数字（线段中点偏上方） ----
-            p.setPen(QColor(140, 140, 140));
-            double mx = (x1 + x2) / 2;           // 中点 X
-            double my = (y1 + y2) / 2;           // 中点 Y
-            p.drawText(QPointF(mx + 4, my - 4),
-                       QString::number(w, 'f', 1));  // 保留 1 位小数
         }
     }
 
-    // -------------------------------------------------------
-    // 第五步：画高亮路径（红色粗线，画在普通边上面）
-    //   单独循环确保高亮线在最上层（不会被灰线盖住）
-    // -------------------------------------------------------
-    if (highlight.getSize() >= 2) {
-        p.setPen(QPen(QColor(220, 50, 50), 5));  // 红色，线宽 5px
-        for (int k = 0; k < highlight.getSize() - 1; k++) {
-            int a = highlight[k];
-            int b = highlight[k + 1];
-            p.drawLine(QPointF(sx[a], sy[a]), QPointF(sx[b], sy[b]));
-        }
+    // 2. 画所有节点（按颜色分级）
+    for (int i = 0; i < ids.size(); ++i) {
+        const QPointF* pos = pos_.find(ids[i]);
+        if (!pos) continue;
+
+        QColor col = QColor(74, 144, 217);       // 默认蓝色
+        if (ids[i] == srcHL_)      col = QColor(39, 174, 96);   // 起点绿色
+        else if (ids[i] == dstHL_) col = QColor(231, 76, 60);   // 终点红色
+        else if (isNodeHL(ids[i])) col = QColor(243, 156, 18);  // 路径节点橙色
+        else if (ids[i] == hovered_) col = QColor(100, 180, 255); // 悬停亮蓝
+
+        drawNode(p, ids[i], *pos, col);
     }
 
-    // -------------------------------------------------------
-    // 第六步：画节点（圆 + 标签）
-    //   每个节点：阴影 → 渐变圆 → 标签文字
-    //   在高亮路径上的节点：红色实心圆
-    // -------------------------------------------------------
-    p.setFont(QFont("Microsoft YaHei", 10, QFont::Bold));
+    // 3. 悬停浮窗（节点详情）
+    if (hovered_ > 0 && g_) {
+        const Node* n = g_->findNode(hovered_);
+        const QPointF* pos = pos_.find(hovered_);
+        if (n && pos) {
+            float bx = pos->x() + R + 8, by = pos->y() - 35;
+            if (bx + 200 > width()) bx = pos->x() - 208;
+            if (by < 5) by = 5;
 
-    for (int i = 0; i < N; i++) {
-        // 判断当前节点是否在高亮路径上
-        bool onPath = false;
-        for (int k = 0; k < highlight.getSize(); k++) {
-            if (highlight[k] == i) { onPath = true; break; }
+            QRectF box(bx, by, 200, 70);
+            p.setPen(Qt::NoPen);
+            p.setBrush(QColor(18, 32, 50, 220));
+            p.drawRoundedRect(box, 6, 6);
+            p.setPen(QColor(70, 130, 190));
+            p.drawRoundedRect(box, 6, 6);
+
+            QFont f = p.font(); f.setPointSize(9); p.setFont(f);
+            p.setPen(QColor(90, 200, 255));
+            p.drawText(box.adjusted(6, 5, -4, -45), Qt::AlignLeft,
+                       QString("[%1] %2").arg(n->id).arg(QString::fromStdString(n->name)));
+            p.setPen(QColor(175, 195, 215));
+            p.drawText(box.adjusted(6, 25, -4, -25), Qt::AlignLeft,
+                       QString::fromStdString(n->address));
+            p.setPen(QColor(140, 180, 210));
+            p.drawText(box.adjusted(6, 48, -4, -5), Qt::AlignLeft,
+                       QString("出边: %1").arg(g_->getNeighbors(n->id).size()));
         }
-
-        double cx = sx[i], cy = sy[i];   // 圆心
-        double r  = 11;                   // 半径（px）
-
-        // ---- 阴影（半透明灰色圆，偏移 2px） ----
-        p.setBrush(QColor(0, 0, 0, 40));    // RGBA: 黑色，alpha=40/255
-        p.setPen(Qt::NoPen);                 // 无边框
-        p.drawEllipse(QPointF(cx + 2, cy + 2), r, r);
-
-        // ---- 主体圆 ----
-        if (onPath) {
-            // 高亮节点：红色实心
-            p.setBrush(QColor(255, 80, 80));
-            p.setPen(QPen(QColor(180, 20, 20), 2.5));
-        } else {
-            // 普通节点：蓝色渐变（浅蓝 → 深蓝）
-            QLinearGradient grad(cx - r, cy - r, cx + r, cy + r);
-            grad.setColorAt(0, QColor(80, 150, 240));   // 左上角浅蓝
-            grad.setColorAt(1, QColor(40, 100, 200));   // 右下角深蓝
-            p.setBrush(grad);
-            p.setPen(QPen(QColor(30, 70, 150), 2));     // 深蓝边框
-        }
-        p.drawEllipse(QPointF(cx, cy), r, r);
-
-        // ---- 城市名标签（圆上方居中） ----
-        p.setPen(Qt::black);
-        QString name = QString::fromUtf8(g->getNodeName(i));
-        // 文字范围：圆上方的一个矩形框，居中显示
-        QRectF br(cx - 30, cy - r - 22, 60, 20);
-        p.drawText(br, Qt::AlignCenter, name);
     }
-
-    // 释放临时数组
-    delete[] sx;
-    delete[] sy;
 }
 
-// =====================================================================
-// MainWindow 构造函数
-// =====================================================================
-MainWindow::MainWindow(QWidget* parent)
-    : QMainWindow(parent)       // 先调用父类 QMainWindow 的构造
-{
-    mgr = new ExpressManager();  // 创建业务管理层（后端）
+void GraphWidget::mouseMoveEvent(QMouseEvent* ev) {
+    int id = nodeAt(ev->pos());
+    if (id != hovered_) {
+        hovered_ = id;
+        emit nodeHovered(id);    // 通知 MainWindow 更新状态栏
+        update();
+    }
+}
 
-    // 窗口基本属性
+void GraphWidget::mousePressEvent(QMouseEvent* ev) {
+    if (ev->button() == Qt::LeftButton) {
+        int id = nodeAt(ev->pos());
+        if (id > 0) emit nodeClicked(id);
+    }
+}
+
+// ============================================================================
+// MainWindow — 主窗口
+// ============================================================================
+
+// QSS 按钮样式
+static const char* BTN_PRIMARY = "background:#3498db;color:white;border:none;border-radius:4px;padding:6px;";
+static const char* BTN_SECONDARY = "background:#5a6a7a;color:white;border:none;border-radius:4px;padding:6px;";
+
+MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowTitle("快递网点配送路径规划系统");
-    resize(1200, 750);           // 默认窗口大小
-    setMinimumSize(900, 550);    // 最小窗口（防止控件挤压变形）
+    resize(1280, 760);
 
-    // ========== 全局样式表（QSS，类似 CSS） ==========
-    // 设置整个窗口的颜色、边框、圆角等视觉效果
-    setStyleSheet(
-        // 主窗口背景
-        "QMainWindow { background: #f5f6fa; }"
+    buildUI();
 
-        // QGroupBox：分组框 → 白色背景、圆角边框
-        "QGroupBox { font-weight: bold; border: 1px solid #d0d0d0; "
-        "  border-radius: 6px; margin-top: 12px; padding-top: 16px; "
-        "  background: #ffffff; }"
-        // QGroupBox 标题 → 深灰色，在边框上方
-        "QGroupBox::title { subcontrol-origin: margin; left: 12px; "
-        "  padding: 0 6px; color: #2c3e50; }"
-
-        // QPushButton：默认蓝色
-        "QPushButton { background: #3498db; color: white; border: none; "
-        "  border-radius: 4px; padding: 6px 14px; font-size: 12px; "
-        "  min-height: 24px; }"
-        // 鼠标悬浮时变深
-        "QPushButton:hover { background: #2980b9; }"
-        // 按下时更深
-        "QPushButton:pressed { background: #1a5276; }"
-        // 删除按钮（objectName="btnDel"）用红色
-        "QPushButton#btnDel { background: #e74c3c; }"
-        "QPushButton#btnDel:hover { background: #c0392b; }"
-
-        // QComboBox：下拉框
-        "QComboBox { border: 1px solid #c0c0c0; border-radius: 3px; "
-        "  padding: 3px 6px; background: white; min-height: 22px; }"
-
-        // QLineEdit：输入框
-        "QLineEdit { border: 1px solid #c0c0c0; border-radius: 3px; "
-        "  padding: 3px 6px; background: white; }"
-
-        // QTextEdit：日志框
-        "QTextEdit { border: 1px solid #c0c0c0; border-radius: 4px; "
-        "  background: #fafbfc; }"
-
-        // QTableWidget：结果表 → 交替行颜色
-        "QTableWidget { border: 1px solid #d0d0d0; gridline-color: #e0e0e0; "
-        "  background: white; alternate-background-color: #f7f8fc; }"
-        // 表头 → 浅灰背景 + 底部边框
-        "QHeaderView::section { background: #e8ecf2; padding: 4px; "
-        "  border: none; border-bottom: 2px solid #d0d0d0; font-weight: bold; }"
-
-        // QToolBar：工具栏 → 白色背景
-        "QToolBar { background: #ffffff; border-bottom: 1px solid #d0d0d0; "
-        "  spacing: 6px; padding: 3px; }"
-
-        // QStatusBar：状态栏 → 浅灰背景
-        "QStatusBar { background: #f0f1f5; border-top: 1px solid #d0d0d0; "
-        "  font-size: 11px; }"
-    );
-
-    // 构建界面的三个部分
-    buildToolBar();
-    buildPanel();
-    buildStatusBar();
-
-    // 最后加载数据
-    loadData();
-}
-
-MainWindow::~MainWindow() {
-    delete mgr;   // 释放业务管理层（其析构会自动释放 ExpressGraph）
-}
-
-// =====================================================================
-// 构建顶部工具栏
-// =====================================================================
-void MainWindow::buildToolBar() {
-    QToolBar* tb = addToolBar("主工具栏");
-    tb->setMovable(false);              // 不允许用户拖动工具栏
-    tb->setIconSize(QSize(18, 18));
-
-    btnPath   = new QPushButton(" 最短路径 ");
-    btnTopo   = new QPushButton(" 批次排班 ");
-    btnOrders = new QPushButton(" 批量订单 ");
-
-    tb->addWidget(btnPath);
-    tb->addSeparator();                // 竖线分隔
-    tb->addWidget(btnTopo);
-    tb->addSeparator();
-    tb->addWidget(btnOrders);
-
-    // 信号与槽：按钮点击 → 调用对应的槽函数
-    connect(btnPath,   &QPushButton::clicked, this, &MainWindow::doFindPath);
-    connect(btnTopo,   &QPushButton::clicked, this, &MainWindow::doTopo);
-    connect(btnOrders, &QPushButton::clicked, this, &MainWindow::doOrders);
-}
-
-// =====================================================================
-// 构建左侧控制面板（放在 QScrollArea 中，通过 QSplitter 连接右侧绘图区）
-// =====================================================================
-void MainWindow::buildPanel() {
-    // 面板主体
-    QWidget* pan = new QWidget();
-    pan->setMinimumWidth(260);       // 最小宽度（防止被拉到看不见）
-    pan->setMaximumWidth(420);       // 最大宽度
-    QVBoxLayout* pl = new QVBoxLayout(pan);
-    pl->setContentsMargins(8, 4, 8, 4);
-    pl->setSpacing(6);
-
-    // ===== 第一组：路径查询 =====
-    QGroupBox* gb1 = new QGroupBox("路径查询");
-    QFormLayout* fl = new QFormLayout(gb1);    // 表单布局："起点:" + 下拉框
-    fl->setSpacing(6);
-    cmbFrom = new QComboBox();
-    cmbTo   = new QComboBox();
-    fl->addRow("起点:", cmbFrom);    // addRow 自动把第一个参数变 QLabel
-    fl->addRow("终点:", cmbTo);
-    pl->addWidget(gb1);
-
-    // ===== 第二组：网点管理（增删） =====
-    QGroupBox* gb2 = new QGroupBox("网点管理");
-    QFormLayout* fl2 = new QFormLayout(gb2);
-    fl2->setSpacing(4);
-    editName = new QLineEdit();
-    editX    = new QLineEdit();
-    editY    = new QLineEdit();
-    btnAdd   = new QPushButton(" 添加网点 ");
-    btnDel   = new QPushButton(" 删除网点 ");
-    btnDel->setObjectName("btnDel");           // 用 objectName 让 QSS 样式表定位
-    fl2->addRow("名称:", editName);
-    fl2->addRow("X:", editX);
-    fl2->addRow("Y:", editY);
-    QHBoxLayout* hb = new QHBoxLayout();        // 添加/删除按钮横排
-    hb->addWidget(btnAdd);
-    hb->addWidget(btnDel);
-    fl2->addRow(hb);                            // 整行放置按钮组
-    pl->addWidget(gb2);
-
-    // ===== 第三组：运行日志 =====
-    QGroupBox* gb3 = new QGroupBox("运行日志");
-    QVBoxLayout* vl3 = new QVBoxLayout(gb3);
-    txtLog = new QTextEdit();
-    txtLog->setReadOnly(true);                  // 只读，用户不能编辑
-    txtLog->setMaximumHeight(120);              // 限制高度
-    vl3->addWidget(txtLog);
-    pl->addWidget(gb3);
-
-    // ===== 第四组：结果详情表 =====
-    QGroupBox* gb4 = new QGroupBox("结果详情");
-    QVBoxLayout* vl4 = new QVBoxLayout(gb4);
-    tblRes = new QTableWidget();
-    tblRes->setColumnCount(3);                  // 三列：序号 | 网点 | 说明
-    tblRes->setHorizontalHeaderLabels({"#", "网点", "说明"});
-    tblRes->horizontalHeader()->setStretchLastSection(true);  // 最后一列自动填满
-    tblRes->setAlternatingRowColors(true);      // 交替行颜色
-    tblRes->setEditTriggers(QAbstractItemView::NoEditTriggers); // 禁止编辑
-    tblRes->setSelectionBehavior(QAbstractItemView::SelectRows); // 点击选中整行
-    tblRes->verticalHeader()->setVisible(false); // 隐藏左侧行号
-    vl4->addWidget(tblRes);
-    pl->addWidget(gb4);
-
-    // 把面板放入滚动区域（面板内容超出时可滚）
-    QScrollArea* sa = new QScrollArea();
-    sa->setWidget(pan);
-    sa->setWidgetResizable(true);               // 面板随滚动区宽度变化
-    sa->setFrameShape(QFrame::NoFrame);         // 无边框
-
-    // 创建绘图控件
-    graph = new GraphWidget();
-
-    // 用 QSplitter 把滚动面板和绘图区左右分割
-    splitter = new QSplitter(Qt::Horizontal);
-    splitter->addWidget(sa);    // 左侧：面板
-    splitter->addWidget(graph); // 右侧：绘图区
-    splitter->setStretchFactor(0, 0);           // 面板不拉伸
-    splitter->setStretchFactor(1, 1);           // 绘图区随窗口拉伸
-    splitter->setSizes({300, 900});             // 初始比例
-
-    setCentralWidget(splitter);                 // 设为窗口的中央控件
-
-    // 网点管理的信号绑定
-    connect(btnAdd, &QPushButton::clicked, this, &MainWindow::doAddNode);
-    connect(btnDel, &QPushButton::clicked, this, &MainWindow::doDelNode);
-}
-
-// =====================================================================
-// 构建底部状态栏
-// =====================================================================
-void MainWindow::buildStatusBar() {
-    lblStatus = new QLabel("就绪");
-    // addPermanentWidget: 放在状态栏右侧
-    // stretch=1: 占满剩余空间
-    statusBar()->addPermanentWidget(lblStatus, 1);
-}
-
-// =====================================================================
-// 加载路网数据
-// =====================================================================
-void MainWindow::loadData() {
-    if (mgr->loadNetwork("nodes.txt", "edges.txt")) {
-        graph->mgr = mgr;             // 把数据指针传给绘图控件
-        refreshComboBoxes();          // 填充下拉框
-
-        // 统计边数（用于状态栏显示）
-        int n = mgr->getGraph()->getNodeCount();
-        int e = 0;
-        for (int i = 0; i < n; i++)
-            for (int j = 0; j < n; j++)
-                if (mgr->getGraph()->hasEdge(i, j)) e++;
-
-        lblStatus->setText(
-            QString("节点: %1  |  边: %2  |  就绪").arg(n).arg(e));
-        log(QString("路网加载成功 (%1 节点, %2 边)").arg(n).arg(e));
+    // 自动加载默认数据
+    if (FileManager::loadNetwork("data/network.txt", graph_)) {
+        logOK(QString("路网加载完成：%1 节点 / %2 条边")
+              .arg(graph_.nodeCount()).arg(graph_.edgeCount()));
+        refreshStats();
+        refreshCanvas();
     } else {
-        logErr("加载失败: nodes.txt / edges.txt 未找到");
+        logErr("未找到 data/network.txt，请通过菜单导入路网数据");
     }
 }
 
-// 刷新起点/终点下拉框（节点增删后调用）
-void MainWindow::refreshComboBoxes() {
-    cmbFrom->clear();
-    cmbTo->clear();
-    ExpressGraph* g = mgr->getGraph();
-    for (int i = 0; i < g->getNodeCount(); i++) {
-        QString s = QString::fromUtf8(g->getNodeName(i));
-        cmbFrom->addItem(s);
-        cmbTo->addItem(s);
+// ---- 快捷按钮创建 ----
+QPushButton* MainWindow::makeBtn(const QString& text, bool secondary) {
+    auto* b = new QPushButton(text);
+    b->setFixedHeight(40);
+    b->setStyleSheet(secondary ? BTN_SECONDARY : BTN_PRIMARY);
+    return b;
+}
+
+// ---- 页面批量创建 ----
+QWidget* MainWindow::makePage(std::initializer_list<std::pair<QString, void(MainWindow::*)()>> items) {
+    auto* w = new QWidget;
+    auto* l = new QVBoxLayout(w);
+    l->setSpacing(6);
+    for (auto& [text, slot] : items) {
+        auto* b = makeBtn(text, text.startsWith("←"));
+        connect(b, &QPushButton::clicked, this, slot);
+        l->addWidget(b);
+    }
+    l->addStretch();
+    return w;
+}
+
+// ---- UI 构建 ----
+void MainWindow::buildUI() {
+    // === 菜单栏 ===
+    auto* fileMenu = menuBar()->addMenu("文件(&F)");
+    connect(fileMenu->addAction("导入路网..."),   &QAction::triggered, this, &MainWindow::onImportNet);
+    connect(fileMenu->addAction("导出路网..."),   &QAction::triggered, this, &MainWindow::onExportNet);
+    fileMenu->addSeparator();
+    connect(fileMenu->addAction("导入订单..."),   &QAction::triggered, this, &MainWindow::onImportOrd);
+    connect(fileMenu->addAction("导出方案..."),   &QAction::triggered, this, &MainWindow::onExportPlans);
+    fileMenu->addSeparator();
+    connect(fileMenu->addAction("退出(&X)"),      &QAction::triggered, this, &QMainWindow::close);
+
+    auto* central = new QWidget(this);
+    setCentralWidget(central);
+    auto* ml = new QHBoxLayout(central);
+    ml->setContentsMargins(0, 0, 0, 0);
+    ml->setSpacing(0);
+
+    // === 左侧导航面板（深色主题） ===
+    auto* left = new QWidget;
+    left->setFixedWidth(260);
+    left->setStyleSheet("background:#1e2d3d;");
+
+    auto* ll = new QVBoxLayout(left);
+    ll->setContentsMargins(8, 8, 8, 8);
+    ll->setSpacing(6);
+
+    // 标题
+    auto* title = new QLabel("🚚 快递路径规划系统");
+    title->setStyleSheet("color:#5ab4ff;font-size:15px;font-weight:bold;padding:6px 0;");
+    title->setAlignment(Qt::AlignCenter);
+    ll->addWidget(title);
+
+    // 统计信息
+    stats_ = new QLabel;
+    stats_->setStyleSheet("color:#56d78a;font-size:12px;background:#16263a;border-radius:4px;padding:6px;");
+    stats_->setAlignment(Qt::AlignCenter);
+    ll->addWidget(stats_);
+
+    // 当前页面指示
+    modeLabel_ = new QLabel("▶ 主菜单");
+    modeLabel_->setStyleSheet("color:#a0c8f0;font-size:12px;padding:2px 4px;");
+    ll->addWidget(modeLabel_);
+
+    // 多页面导航
+    stack_ = new QStackedWidget;
+    stack_->addWidget(makePage({
+        {"网点管理",   &MainWindow::goNode},
+        {"路网管理",   &MainWindow::goNetwork},
+        {"路径查询",   &MainWindow::goPath},
+        {"批次配送",   &MainWindow::goDelivery},
+    }));
+    stack_->addWidget(makePage({    // 网点管理子页
+        {"添加网点",     &MainWindow::onAddNode},
+        {"删除网点",     &MainWindow::onDeleteNode},
+        {"修改网点",     &MainWindow::onUpdateNode},
+        {"查询网点",     &MainWindow::onFindNode},
+        {"显示所有网点", &MainWindow::onListNodes},
+        {"← 返回主菜单", &MainWindow::goMain},
+    }));
+    stack_->addWidget(makePage({    // 路网管理子页
+        {"添加路段",     &MainWindow::onAddEdge},
+        {"删除路段",     &MainWindow::onDeleteEdge},
+        {"显示所有路段", &MainWindow::onListEdges},
+        {"导入路网...",  &MainWindow::onImportNet},
+        {"导出路网...",  &MainWindow::onExportNet},
+        {"← 返回主菜单", &MainWindow::goMain},
+    }));
+    stack_->addWidget(makePage({    // 路径查询子页
+        {"单源最短耗时",  &MainWindow::onShortestTime},
+        {"两点最低费用",  &MainWindow::onCheapestPath},
+        {"清除高亮",      &MainWindow::onClearHL},
+        {"← 返回主菜单", &MainWindow::goMain},
+    }));
+    stack_->addWidget(makePage({    // 批次配送子页
+        {"添加配送订单",  &MainWindow::onAddOrder},
+        {"删除订单",      &MainWindow::onDelOrder},
+        {"显示所有订单",  &MainWindow::onListOrders},
+        {"批量导入订单",  &MainWindow::onImportOrd},
+        {"规划所有订单",  &MainWindow::onPlanAll},
+        {"拓扑批次排序",  &MainWindow::onTopoSort},
+        {"导出配送方案",  &MainWindow::onExportPlans},
+        {"← 返回主菜单", &MainWindow::goMain},
+    }));
+    ll->addWidget(stack_);
+
+    // 日志区
+    ll->addWidget([]() {
+        auto* l = new QLabel("── 操作日志 ──");
+        l->setStyleSheet("color:#3a5060;font-size:11px;");
+        return l;
+    }());
+    logBox_ = new QTextEdit;
+    logBox_->setReadOnly(true);
+    logBox_->setMaximumHeight(180);
+    logBox_->setStyleSheet("background:#0f1a26;color:#b0c8e0;font-size:12px;"
+                           "border:1px solid #243040;border-radius:3px;");
+    ll->addWidget(logBox_);
+
+    ml->addWidget(left);
+
+    // === 右侧画布 ===
+    canvas_ = new GraphWidget;
+    connect(canvas_, &GraphWidget::nodeHovered, this, [this](int id) {
+        if (id > 0) {
+            const Node* n = graph_.findNode(id);
+            if (n) statusBar()->showMessage(
+                QString("[%1] %2  %3")
+                    .arg(id)
+                    .arg(QString::fromStdString(n->name))
+                    .arg(QString::fromStdString(n->address)));
+        } else {
+            statusBar()->clearMessage();
+        }
+    });
+    ml->addWidget(canvas_, 1);   // stretch=1，占满剩余空间
+
+    refreshStats();
+}
+
+// ---- 页面导航 ----
+void MainWindow::goMain()     { stack_->setCurrentIndex(0); modeLabel_->setText("▶ 主菜单"); }
+void MainWindow::goNode()     { stack_->setCurrentIndex(1); modeLabel_->setText("▶ 网点管理"); }
+void MainWindow::goNetwork()  { stack_->setCurrentIndex(2); modeLabel_->setText("▶ 路网管理"); }
+void MainWindow::goPath()     { stack_->setCurrentIndex(3); modeLabel_->setText("▶ 路径查询"); }
+void MainWindow::goDelivery() { stack_->setCurrentIndex(4); modeLabel_->setText("▶ 批次配送"); }
+
+// ---- 辅助 ----
+void MainWindow::refreshStats() {
+    stats_->setText(QString("网点: %1  路段: %2  订单: %3")
+                    .arg(graph_.nodeCount()).arg(graph_.edgeCount()).arg(orders_.getOrders().size()));
+}
+
+void MainWindow::refreshCanvas() {
+    canvas_->setGraph(&graph_);
+    canvas_->setHL(hlNodes_, hlEdgeSrc_, hlEdgeDst_, srcHL_, dstHL_);
+}
+
+void MainWindow::log(const QString& msg, const QString& color) {
+    logBox_->append(QString("<span style='color:%1'>%2</span>").arg(color).arg(msg));
+    logBox_->verticalScrollBar()->setValue(logBox_->verticalScrollBar()->maximum());
+}
+
+void MainWindow::logOK(const QString& msg)  { log(msg, "#56d78a"); }
+void MainWindow::logErr(const QString& msg) { log(msg, "#e05050"); }
+
+void MainWindow::applyPathToHL(const DynArray<int>& path) {
+    for (int i = 0; i + 1 < path.size(); ++i) {
+        hlEdgeSrc_.push_back(path[i]);
+        hlEdgeDst_.push_back(path[i + 1]);
+        hlNodes_.push_back(path[i]);
+        hlNodes_.push_back(path[i + 1]);
+    }
+    refreshCanvas();
+}
+
+void MainWindow::clearHL() {
+    hlNodes_.clear(); hlEdgeSrc_.clear(); hlEdgeDst_.clear();
+    srcHL_ = dstHL_ = -1;
+    canvas_->clearHL();
+}
+
+// ---- 对话框辅助宏 ----
+#define MAKE_DLG(title) \
+    QDialog dlg(this); dlg.setWindowTitle(title); \
+    auto* form = new QFormLayout(&dlg); \
+    auto* btns = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel); \
+    connect(btns, &QDialogButtonBox::accepted, &dlg, &QDialog::accept); \
+    connect(btns, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+#define SPIN(var, lo, hi) auto* var = new QSpinBox; var->setRange(lo, hi);
+#define DSPIN(var, lo, hi) auto* var = new QDoubleSpinBox; var->setRange(lo, hi); var->setDecimals(1);
+
+// ================================================================
+// 网点管理
+// ================================================================
+void MainWindow::onAddNode() {
+    MAKE_DLG("添加网点");
+    SPIN(id, 1, 9999);
+    auto* nm = new QLineEdit;
+    auto* addr = new QLineEdit;
+    DSPIN(lon, 0, 200); DSPIN(lat, 0, 100);
+    form->addRow("编号:", id);
+    form->addRow("名称:", nm);
+    form->addRow("地址:", addr);
+    form->addRow("经度:", lon);
+    form->addRow("纬度:", lat);
+    form->addRow(btns);
+    if (dlg.exec() != QDialog::Accepted) return;
+    if (graph_.addNode(Node(id->value(), nm->text().toStdString(), addr->text().toStdString(),
+                            lon->value(), lat->value()))) {
+        logOK(QString("网点 [%1] %2 添加成功").arg(id->value()).arg(nm->text()));
+        refreshStats(); refreshCanvas();
+    } else {
+        logErr("添加失败（编号已存在或名称为空）");
     }
 }
 
-// ---- 日志辅助 ----
-void MainWindow::log(const QString& s) {
-    // HTML 富文本：灰色 [INFO] 前缀
-    txtLog->append("<span style='color:#2c3e50'>[INFO]</span> " + s);
+void MainWindow::onDeleteNode() {
+    MAKE_DLG("删除网点");
+    SPIN(id, 1, 9999);
+    form->addRow("编号:", id);
+    form->addRow(btns);
+    if (dlg.exec() != QDialog::Accepted) return;
+    if (graph_.deleteNode(id->value())) {
+        logOK(QString("网点 [%1] 已删除").arg(id->value()));
+        clearHL(); refreshStats(); refreshCanvas();
+    } else {
+        logErr("网点不存在");
+    }
 }
 
-void MainWindow::logErr(const QString& s) {
-    // HTML 富文本：红色 [ERR] 前缀 + 加粗
-    txtLog->append(
-        "<span style='color:#c0392b;font-weight:bold'>[ERR]</span> " + s);
+void MainWindow::onUpdateNode() {
+    MAKE_DLG("修改网点");
+    SPIN(id, 1, 9999);
+    auto* nm = new QLineEdit;
+    auto* addr = new QLineEdit;
+    form->addRow("编号:", id);
+    form->addRow("新名称:", nm);
+    form->addRow("新地址:", addr);
+    form->addRow(btns);
+    if (dlg.exec() != QDialog::Accepted) return;
+    if (graph_.updateNode(id->value(), Node(id->value(), nm->text().toStdString(), addr->text().toStdString()))) {
+        logOK("修改成功");
+        refreshCanvas();
+    } else {
+        logErr("修改失败");
+    }
 }
 
-// =====================================================================
-// 槽函数：计算最短路径（Dijkstra）
-// =====================================================================
-void MainWindow::doFindPath() {
-    graph->clearPath();    // 清除上次的高亮
-
-    // 从 QComboBox 获取用户选择的起点/终点，转为 UTF-8 字节
-    QByteArray fa = cmbFrom->currentText().toUtf8();
-    QByteArray ta = cmbTo->currentText().toUtf8();
-
-    // 调用后端核心算法
-    PathResult r = mgr->findShortestPath(fa.constData(), ta.constData());
-
-    if (!r.reachable) {
-        logErr(QString("不可达: %1 -> %2")
-               .arg(cmbFrom->currentText(), cmbTo->currentText()));
-        QMessageBox::warning(this, "无路径", "两点间没有连通路径。");
-        lblStatus->setText("上次查询: 不可达");
-        return;
+void MainWindow::onFindNode() {
+    MAKE_DLG("查询网点");
+    SPIN(id, 1, 9999);
+    form->addRow("编号:", id);
+    form->addRow(btns);
+    if (dlg.exec() != QDialog::Accepted) return;
+    const Node* n = graph_.findNode(id->value());
+    if (n) {
+        logOK(QString("[%1] %2  %3").arg(n->id)
+              .arg(QString::fromStdString(n->name))
+              .arg(QString::fromStdString(n->address)));
+        clearHL();
+        hlNodes_.push_back(n->id);
+        refreshCanvas();
+    } else {
+        logErr("网点不存在");
     }
-
-    // 日志输出
-    log(QString("路径: %1 → %2  |  耗时 %3 h")
-        .arg(cmbFrom->currentText(), cmbTo->currentText())
-        .arg(r.cost, 0, 'f', 1));    // 保留 1 位小数
-
-    // 填充结果表格
-    tblRes->setRowCount(0);           // 清空旧行
-    ExpressGraph* g = mgr->getGraph();
-    for (int i = 0; i < r.path.getSize(); i++) {
-        tblRes->insertRow(i);
-        // 列 0: 序号
-        tblRes->setItem(i, 0, new QTableWidgetItem(QString::number(i + 1)));
-        // 列 1: 网点名
-        tblRes->setItem(i, 1, new QTableWidgetItem(
-            QString::fromUtf8(g->getNodeName(r.path[i]))));
-        // 列 2: 到达 or 途经
-        tblRes->setItem(i, 2, new QTableWidgetItem(
-            i == r.path.getSize() - 1 ? "✓ 到达" : "→ 途经"));
-    }
-
-    // 绘图区高亮路径
-    graph->showPath(r.path);
-
-    // 状态栏更新
-    lblStatus->setText(QString("路径: %1 → %2  |  %3 h  |  %4 站")
-        .arg(cmbFrom->currentText(), cmbTo->currentText())
-        .arg(r.cost, 0, 'f', 1)
-        .arg(r.path.getSize()));
 }
 
-// =====================================================================
-// 槽函数：批次排班检测（拓扑排序）
-// =====================================================================
-void MainWindow::doTopo() {
-    graph->clearPath();
-
-    TopoResult r = mgr->checkDependencies("dependencies.txt");
-
-    if (r.hasCycle) {
-        logErr("拓扑排序: 检测到配送环路冲突!");
-        QMessageBox::critical(this, "环路错误",
-            "依赖关系中存在循环!\n请检查 dependencies.txt。");
-        lblStatus->setText("拓扑排序: 存在环路");
-        return;
+void MainWindow::onListNodes() {
+    DynArray<int> ids = graph_.getAllNodeIds();
+    for (int i = 0; i < ids.size() - 1; ++i)
+        for (int j = i + 1; j < ids.size(); ++j)
+            if (ids[i] > ids[j]) { int t = ids[i]; ids[i] = ids[j]; ids[j] = t; }
+    log(QString("── 所有网点（%1）──").arg(ids.size()), "#5ab4ff");
+    for (int i = 0; i < ids.size(); ++i) {
+        const Node* n = graph_.findNode(ids[i]);
+        if (n) log(QString("[%1] %2  %3").arg(n->id)
+                   .arg(QString::fromStdString(n->name))
+                   .arg(QString::fromStdString(n->address)));
     }
-
-    log(QString("拓扑排序: %1 节点, 无环路").arg(r.order.getSize()));
-
-    // 填充结果表格
-    tblRes->setRowCount(0);
-    ExpressGraph* g = mgr->getGraph();
-    for (int i = 0; i < r.order.getSize(); i++) {
-        tblRes->insertRow(i);
-        tblRes->setItem(i, 0, new QTableWidgetItem(QString::number(i + 1)));
-        tblRes->setItem(i, 1, new QTableWidgetItem(
-            QString::fromUtf8(g->getNodeName(r.order[i]))));
-        tblRes->setItem(i, 2, new QTableWidgetItem(
-            QString("第 %1 批次").arg(i + 1)));
-    }
-
-    // 在绘图区用高亮展示拓扑排序顺序
-    graph->showPath(r.order);
-    lblStatus->setText(
-        QString("拓扑排序: %1 批次").arg(r.order.getSize()));
 }
 
-// =====================================================================
-// 槽函数：批量处理订单
-// =====================================================================
-void MainWindow::doOrders() {
-    graph->clearPath();
-
-    int n = mgr->batchProcessOrders("orders.txt", "result.txt");
-
-    if (n < 0) {
-        logErr("批量订单: 无法读取 orders.txt");
-        return;
+// ================================================================
+// 路网管理
+// ================================================================
+void MainWindow::onAddEdge() {
+    MAKE_DLG("添加路段");
+    SPIN(f, 1, 9999); SPIN(t, 1, 9999);
+    DSPIN(ti, 0, 999); DSPIN(co, 0, 99999);
+    form->addRow("起点:", f);
+    form->addRow("终点:", t);
+    form->addRow("耗时(h):", ti);
+    form->addRow("费用(元):", co);
+    form->addRow(btns);
+    if (dlg.exec() != QDialog::Accepted) return;
+    if (graph_.addEdge(Edge(f->value(), t->value(), ti->value(), co->value()))) {
+        logOK(QString("路段 %1→%2 添加成功").arg(f->value()).arg(t->value()));
+        refreshStats(); refreshCanvas();
+    } else {
+        logErr("添加失败");
     }
-
-    log(QString("批量订单: 成功 %1 单 → result.txt").arg(n));
-    QMessageBox::information(this, "批量处理完成",
-        QString("处理 %1 笔订单完毕。\n详细结果见 result.txt。").arg(n));
-    lblStatus->setText(QString("批量订单: %1 笔已处理").arg(n));
 }
 
-// =====================================================================
-// 槽函数：添加网点
-// =====================================================================
-void MainWindow::doAddNode() {
-    QByteArray na = editName->text().trimmed().toUtf8();
-    if (na.isEmpty()) return;            // 空名称不处理
-
-    bool ox, oy;
-    double x = editX->text().toDouble(&ox);   // toDouble: QString→double
-    double y = editY->text().toDouble(&oy);   // ox=true 表示转换成功
-    if (!ox || !oy) {
-        logErr("坐标须为数字");
-        return;
+void MainWindow::onDeleteEdge() {
+    MAKE_DLG("删除路段");
+    SPIN(f, 1, 9999); SPIN(t, 1, 9999);
+    form->addRow("起点:", f);
+    form->addRow("终点:", t);
+    form->addRow(btns);
+    if (dlg.exec() != QDialog::Accepted) return;
+    if (graph_.deleteEdge(f->value(), t->value())) {
+        logOK(QString("路段 %1→%2 已删除").arg(f->value()).arg(t->value()));
+        clearHL(); refreshStats(); refreshCanvas();
+    } else {
+        logErr("路段不存在");
     }
-
-    if (!mgr->addNode(na.constData(), x, y)) {
-        logErr("网点已存在: " + editName->text());
-        return;
-    }
-
-    log("添加: " + editName->text());
-    refreshComboBoxes();                 // 下拉框同步更新
-    editName->clear();
-    editX->clear();
-    editY->clear();
-    graph->update();                     // 刷新绘图
-
-    int n = mgr->getGraph()->getNodeCount();
-    lblStatus->setText(
-        QString("节点: %1  |  新增: %2").arg(n).arg(QString::fromUtf8(na)));
 }
 
-// =====================================================================
-// 槽函数：删除网点
-// =====================================================================
-void MainWindow::doDelNode() {
-    QByteArray na = editName->text().trimmed().toUtf8();
-    if (na.isEmpty()) return;
-
-    if (!mgr->removeNode(na.constData())) {
-        logErr("网点不存在: " + editName->text());
-        return;
+void MainWindow::onListEdges() {
+    DynArray<int> ids = graph_.getAllNodeIds();
+    for (int i = 0; i < ids.size() - 1; ++i)
+        for (int j = i + 1; j < ids.size(); ++j)
+            if (ids[i] > ids[j]) { int t = ids[i]; ids[i] = ids[j]; ids[j] = t; }
+    log(QString("── 所有路段（%1）──").arg(graph_.edgeCount()), "#5ab4ff");
+    for (int i = 0; i < ids.size(); ++i) {
+        const DynArray<Edge>& es = graph_.getNeighbors(ids[i]);
+        for (int j = 0; j < es.size(); ++j) {
+            std::ostringstream s;
+            s << std::fixed << std::setprecision(1)
+              << es[j].from << "→" << es[j].to
+              << "  耗时" << es[j].time << "h  费用" << es[j].cost << "元";
+            log(QString::fromStdString(s.str()));
+        }
     }
+}
 
-    log("已删除: " + editName->text());
-    graph->clearPath();                  // 清除高亮（被删节点可能在路径上）
-    refreshComboBoxes();
-    editName->clear();
-    graph->update();
+void MainWindow::onImportNet() {
+    QString p = QFileDialog::getOpenFileName(this, "导入路网", "data", "文本文件 (*.txt)");
+    if (p.isEmpty()) return;
+    graph_.clear();
+    clearHL();
+    if (FileManager::loadNetwork(p.toStdString(), graph_)) {
+        logOK(QString("导入成功：%1 节点 / %2 路段").arg(graph_.nodeCount()).arg(graph_.edgeCount()));
+        refreshStats(); refreshCanvas();
+    } else {
+        logErr("导入失败");
+    }
+}
 
-    int n = mgr->getGraph()->getNodeCount();
-    lblStatus->setText(QString("节点: %1  |  已删除").arg(n));
+void MainWindow::onExportNet() {
+    QString p = QFileDialog::getSaveFileName(this, "导出路网", "data/network.txt", "文本文件 (*.txt)");
+    if (p.isEmpty()) return;
+    if (FileManager::saveNetwork(p.toStdString(), graph_))
+        logOK("已保存：" + p);
+    else
+        logErr("保存失败");
+}
+
+// ================================================================
+// 路径查询
+// ================================================================
+void MainWindow::onShortestTime() {
+    MAKE_DLG("单源最短耗时查询");
+    SPIN(src, 1, 9999);
+    form->addRow("起点编号:", src);
+    form->addRow(btns);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    clearHL();
+    auto res = Dijkstra::shortestTimeFrom(graph_, src->value());
+    if (res.empty()) { logErr("起点不存在"); return; }
+
+    srcHL_ = src->value();
+    log(QString("── 从 [%1] 出发的最短耗时 ──").arg(src->value()), "#5ac4ff");
+
+    DynArray<int> ids = graph_.getAllNodeIds();
+    for (int i = 0; i < ids.size(); ++i) {
+        if (ids[i] == src->value()) continue;
+        PathResult* pr = res.find(ids[i]);
+        if (!pr || !pr->reachable) continue;
+
+        // 收集高亮边
+        for (int j = 0; j + 1 < pr->path.size(); ++j) {
+            hlEdgeSrc_.push_back(pr->path[j]);
+            hlEdgeDst_.push_back(pr->path[j + 1]);
+        }
+        hlNodes_.push_back(ids[i]);
+
+        const Node* n = graph_.findNode(ids[i]);
+        log(QString("[%1] %2  耗时%3h  费用%4元")
+            .arg(ids[i])
+            .arg(n ? QString::fromStdString(n->name) : "?")
+            .arg(pr->totalTime, 0, 'f', 1)
+            .arg(pr->totalCost, 0, 'f', 0),
+            "#c8deb0");
+    }
+    refreshCanvas();
+}
+
+void MainWindow::onCheapestPath() {
+    MAKE_DLG("两点最低费用路径");
+    SPIN(s, 1, 9999); SPIN(d, 1, 9999);
+    form->addRow("起点:", s);
+    form->addRow("终点:", d);
+    form->addRow(btns);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    clearHL();
+    PathResult r = Dijkstra::cheapestPath(graph_, s->value(), d->value());
+    if (!r.reachable) { logErr("不可达"); return; }
+
+    srcHL_ = s->value();
+    dstHL_ = d->value();
+    applyPathToHL(r.path);
+
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(1);
+    ss << "路径: ";
+    for (int i = 0; i < r.path.size(); ++i) {
+        const Node* n = graph_.findNode(r.path[i]);
+        ss << "[" << r.path[i] << "]"
+           << (n ? n->name : "?");
+        if (i + 1 < r.path.size()) ss << " → ";
+    }
+    logOK(QString::fromStdString(ss.str()));
+    logOK(QString("费用: %1元  耗时: %2h").arg(r.totalCost, 0, 'f', 0).arg(r.totalTime, 0, 'f', 1));
+}
+
+void MainWindow::onClearHL() { clearHL(); logOK("已清除高亮"); }
+
+// ================================================================
+// 批次配送
+// ================================================================
+void MainWindow::onAddOrder() {
+    MAKE_DLG("添加配送订单");
+    SPIN(oid, 1, 99999);
+    SPIN(s, 1, 9999);
+    SPIN(d, 1, 9999);
+    auto* goods = new QLineEdit;
+    auto* opt = new QComboBox;
+    opt->addItem("最低费用");
+    opt->addItem("最短耗时");
+    form->addRow("订单号:", oid);
+    form->addRow("起点:", s);
+    form->addRow("终点:", d);
+    form->addRow("货物:", goods);
+    form->addRow("优化目标:", opt);
+    form->addRow(btns);
+    if (dlg.exec() != QDialog::Accepted) return;
+    if (orders_.addOrder(Order(oid->value(), s->value(), d->value(),
+                               goods->text().toStdString(), opt->currentIndex() == 1))) {
+        logOK(QString("订单 %1 添加成功").arg(oid->value()));
+        refreshStats();
+    } else {
+        logErr("订单号已存在");
+    }
+}
+
+void MainWindow::onDelOrder() {
+    MAKE_DLG("删除订单");
+    SPIN(id, 1, 99999);
+    form->addRow("订单号:", id);
+    form->addRow(btns);
+    if (dlg.exec() != QDialog::Accepted) return;
+    if (orders_.removeOrder(id->value())) {
+        logOK(QString("订单 %1 已删除").arg(id->value()));
+        refreshStats();
+    } else {
+        logErr("订单不存在");
+    }
+}
+
+void MainWindow::onListOrders() {
+    const DynArray<Order>& os = orders_.getOrders();
+    log(QString("── 所有订单（%1）──").arg(os.size()), "#5ab4ff");
+    for (int i = 0; i < os.size(); ++i)
+        log(QString("[%1] %2→%3  %4  %5")
+            .arg(os[i].orderId)
+            .arg(os[i].srcNode)
+            .arg(os[i].dstNode)
+            .arg(QString::fromStdString(os[i].goods))
+            .arg(os[i].byTime ? "最短耗时" : "最低费用"));
+}
+
+void MainWindow::onImportOrd() {
+    QString p = QFileDialog::getOpenFileName(this, "导入订单", "data", "文本文件 (*.txt)");
+    if (p.isEmpty()) return;
+    if (FileManager::loadOrders(p.toStdString(), orders_)) {
+        logOK(QString("导入：%1 条订单").arg(orders_.getOrders().size()));
+        refreshStats();
+    } else {
+        logErr("导入失败");
+    }
+}
+
+void MainWindow::onPlanAll() {
+    clearHL();
+    DynArray<DeliveryPlan> plans = orders_.planAllOrders(graph_);
+    log(QString("── 批量规划结果 ──"), "#5ac4ff");
+    for (int i = 0; i < plans.size(); ++i) {
+        const DeliveryPlan& p = plans[i];
+        if (!p.result.reachable) {
+            logErr(QString("订单 %1 不可达").arg(p.order.orderId));
+            continue;
+        }
+        std::ostringstream s;
+        s << std::fixed << std::setprecision(1)
+          << "[" << p.order.orderId << "] " << p.order.goods << ": ";
+        for (int j = 0; j < p.result.path.size(); ++j) {
+            s << p.result.path[j];
+            if (j + 1 < p.result.path.size()) s << "→";
+        }
+        s << "  " << (p.order.byTime ? p.result.totalTime : p.result.totalCost)
+          << (p.order.byTime ? "h" : "元");
+        logOK(QString::fromStdString(s.str()));
+        applyPathToHL(p.result.path);
+    }
+    logOK(QString("完成，共 %1 条").arg(plans.size()));
+}
+
+void MainWindow::onTopoSort() {
+    clearHL();
+    TopoResult res = orders_.planBatchSequence(graph_);
+    if (res.hasCycle) {
+        logErr("检测到环路！涉及节点：");
+        for (int i = 0; i < res.cycleNodes.size(); ++i) {
+            hlNodes_.push_back(res.cycleNodes[i]);
+            const Node* n = graph_.findNode(res.cycleNodes[i]);
+            log(QString("  %1（%2）").arg(res.cycleNodes[i])
+                .arg(n ? QString::fromStdString(n->name) : "?"), "#e09050");
+        }
+    } else {
+        log(QString("── 拓扑排序配送顺序 ──"), "#5ac4ff");
+        QString line;
+        for (int i = 0; i < res.order.size(); ++i) {
+            int id = res.order[i];
+            hlNodes_.push_back(id);
+            const Node* n = graph_.findNode(id);
+            QString nm = n ? QString::fromStdString(n->name) : "?";
+            if (nm.size() > 3) nm = nm.left(3);
+            line += QString("%1(%2)").arg(id).arg(nm);
+            if (i + 1 < res.order.size()) line += "→";
+            if (line.size() > 48) {
+                log(line, "#c8d8b0");
+                line.clear();
+            }
+        }
+        if (!line.isEmpty()) log(line, "#c8d8b0");
+        logOK(QString::number(res.order.size()) + " 个节点，无环路");
+    }
+    refreshCanvas();
+}
+
+void MainWindow::onExportPlans() {
+    QString p = QFileDialog::getSaveFileName(this, "导出方案", "data/plans.txt", "文本文件 (*.txt)");
+    if (p.isEmpty()) return;
+    DynArray<DeliveryPlan> plans = orders_.planAllOrders(graph_);
+    if (FileManager::savePlans(p.toStdString(), graph_, plans))
+        logOK("已导出：" + p);
+    else
+        logErr("导出失败");
 }

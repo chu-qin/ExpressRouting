@@ -1,142 +1,174 @@
-#ifndef MAINWINDOW_H
-#define MAINWINDOW_H
-
+#pragma once
 // ============================================================================
-// Qt 头文件 — 每个的作用见右侧注释
+// MainWindow.h — Qt 图形界面
 // ============================================================================
-#include <QMainWindow>       // 主窗口基类（setCentralWidget / addToolBar / statusBar）
-#include <QToolBar>          // 顶部工具栏（放快捷按钮）
-#include <QStatusBar>        // 底部状态栏（显示节点数、边数、操作结果）
-#include <QSplitter>         // 可拖动的分割条（左侧面板 | 右侧绘图区 可调大小）
-#include <QComboBox>         // 下拉选择框（选起点/终点，避免用户手输错字）
-#include <QPushButton>       // 按钮（计算路径、批次排班、添加/删除网点等）
-#include <QTextEdit>         // 多行文本显示框（日志输出，支持 HTML 彩色文字）
-#include <QLineEdit>         // 单行输入框（网点名称、X 坐标、Y 坐标输入）
-#include <QTableWidget>      // 表格控件（显示路径详情、批次结果）
-#include <QVBoxLayout>       // 纵向布局器（控件从上到下排列）
-#include <QHBoxLayout>       // 横向布局器（控件从左到右排列）
-#include <QFormLayout>       // 表单布局器（"起点: [下拉框]" 这种对齐格式）
-#include <QLabel>            // 标签文字（"起点:" "日志:" 等静态文字）
-#include <QGroupBox>         // 带标题的分组框（"路径查询""网点管理" 等分组）
-#include <QMessageBox>       // 弹窗对话框（警告、错误、信息提示）
-#include <QPainter>          // 画笔引擎（drawLine / drawEllipse / drawText）
-#include <QPaintEvent>       // 绘图事件（paintEvent 函数参数类型）
-#include <QHeaderView>       // 表格表头控制（最后一列自动拉伸）
-#include <QScrollArea>       // 滚动区域（控制面板内容过多时可滚动）
-#include <QFont>             // 字体（设置绘图时节点标签的字体）
-#include <QColor>            // 颜色（节点蓝、高亮红、边灰等）
-#include <QPen>              // 画笔属性（线宽、颜色）
-#include <QBrush>            // 画刷属性（填充色、渐变）
-#include <QLinearGradient>   // 线性渐变（节点从浅蓝到深蓝的渐变效果）
-#include <cmath>             // C 数学库（atan2 / cos / sin → 画箭头用）
-
-#include "ExpressManager.h"  // 业务管理层（我们的后端逻辑）
-
-// ============================================================================
-// GraphWidget — 图绘制控件
-// ============================================================================
-// 这是一个自定义 QWidget，重写了 paintEvent 来实现所有绘图：
-//   - 灰色背景网格
-//   - 灰色有向边 + 箭头 + 边权数字（如 "5.5"）
-//   - 蓝色渐变实心圆 + 城市名标签
-//   - 红色粗线高亮最短路径 + 节点变红
+// 界面结构：
+//  ┌─────────────────────────────────────────────────────┐
+//  │ 菜单栏: [文件] 导入路网 | 导出路网 | 导入订单 | 导出方案 │
+//  ├───────────────┬─────────────────────────────────────┤
+//  │ 左侧导航面板   │                                     │
+//  │  (深色主题)    │         GraphWidget 绘图区           │
+//  │               │         (交互式画布)                 │
+//  │  统计信息      │                                     │
+//  │  [按钮列表]    │    - 鼠标悬停 → 节点详情浮窗         │
+//  │  (多页切换)    │    - 鼠标点击 → 选中节点             │
+//  │               │    - 箭头 + 高亮路径                 │
+//  │  操作日志      │                                     │
+//  ├───────────────┴─────────────────────────────────────┤
+//  │ 状态栏: 悬停提示 | 就绪                               │
+//  └─────────────────────────────────────────────────────┘
 //
-// 为什么单独做成一个控件？
-//   放在 QSplitter 右侧，有自己独立的坐标系（0,0）= 控件左上角，
-//   无需像画在整个 MainWindow 上那样手动偏移面板宽度。
+// 导航方式：QStackedWidget 多页面（主菜单 / 网点管理 / 路网管理 / 路径查询 / 批次配送）
+// 操作方式：弹出对话框（QDialog + QFormLayout）
+// 画布交互：GraphWidget 支持鼠标悬停（浮窗详情）和点击（选中节点）
+// ============================================================================
+
+#include <QMainWindow>
+#include <QWidget>
+#include <QTextEdit>
+#include <QLabel>
+#include <QStackedWidget>
+#include <QPointF>
+
+#include "Graph.h"
+#include "OrderManager.h"
+
+// ============================================================================
+// GraphWidget — 路网画布（交互式）
+// ============================================================================
+// 绘图功能：
+//   - 灰色箭头边 + 高亮路径（橙色粗线）
+//   - 渐变圆形节点 + 编号 + 名称标签
+//   - 起点绿色 / 终点红色 / 路径节点橙色 / 默认蓝色
+//
+// 交互功能：
+//   - 鼠标悬停：节点变亮蓝 + 弹出详情浮窗（编号/名称/地址/出边数）
+//   - 鼠标点击：发射 nodeClicked 信号
+//
+// 坐标系统：
+//   节点的 (lon, lat) 经纬度 → 屏幕坐标 (x, y)
+//   自动缩放：找所有节点的经纬度 min/max → 等比映射到画布区域 + 10px 边距
 // ============================================================================
 class GraphWidget : public QWidget {
-    Q_OBJECT    // Qt 元对象宏（启用信号槽、MOC 预处理）
+    Q_OBJECT
 
 public:
-    ExpressManager* mgr;          // 指向业务管理层的指针（获取图数据）
-    MyVector<int>   highlight;    // 当前需要高亮的路径（节点索引序列）
+    explicit GraphWidget(QWidget* parent = nullptr);
 
-    explicit GraphWidget(QWidget* parent = nullptr)
-        : QWidget(parent), mgr(nullptr) {
-        setMinimumSize(500, 400);
-        // 尺寸策略：水平+垂直都扩展，填满分配给它的所有空间
-        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    }
+    // 设置图数据指针并刷新坐标
+    void setGraph(const Graph* g);
 
-    // 设置高亮路径并刷新
-    void showPath(const MyVector<int>& path) {
-        highlight = path;
-        update();    // 触发 Qt 重绘 → 调用 paintEvent
-    }
+    // 设置高亮：（路径节点, 路径边源列表, 路径边目标列表, 起点, 终点）
+    void setHL(const DynArray<int>& nodes, const DynArray<int>& edgeSrc,
+               const DynArray<int>& edgeDst, int src, int dst);
+    void clearHL();
 
-    // 清除高亮路径并刷新
-    void clearPath() {
-        highlight.clear();
-        update();
-    }
+signals:
+    void nodeHovered(int id);   // 鼠标悬停在节点上
+    void nodeClicked(int id);   // 鼠标点击节点
 
 protected:
-    // 绘图事件（Qt 在需要重绘时自动调用）
     void paintEvent(QPaintEvent*) override;
+    void mouseMoveEvent(QMouseEvent*) override;
+    void mousePressEvent(QMouseEvent*) override;
+    void resizeEvent(QResizeEvent*) override;
+
+private:
+    const Graph* g_ = nullptr;
+
+    // 节点编号 → 屏幕坐标（由 updatePos 根据经纬度计算）
+    HashMap<int, QPointF> pos_;
+
+    // 高亮状态
+    DynArray<int> hlNodes_;      // 高亮节点
+    DynArray<int> hlEdgeSrc_;    // 高亮边起点
+    DynArray<int> hlEdgeDst_;    // 高亮边终点
+    int srcHL_ = -1;             // 起点（绿色）
+    int dstHL_ = -1;             // 终点（红色）
+    int hovered_ = -1;           // 当前悬停节点
+
+    static constexpr float R = 18.0f;  // 节点圆半径
+
+    void updatePos();                    // 根据经纬度重新计算所有节点屏幕坐标
+    bool isNodeHL(int id) const;         // 节点是否高亮
+    bool isEdgeHL(int f, int t) const;   // 边是否高亮
+    int  nodeAt(QPoint p) const;         // 屏幕坐标 → 节点编号（-1=无）
+    void drawEdge(class QPainter& p, QPointF a, QPointF b, QColor col, float w, bool bidirectional);
+    void drawNode(class QPainter& p, int id, QPointF pos, QColor col);
 };
 
 // ============================================================================
 // MainWindow — 主窗口
 // ============================================================================
-// 界面结构：
-//  ┌─────────────────────────────────────────────────────┐
-//  │ 工具栏: [最短路径] [批次排班] [批量订单]            │
-//  ├───────────────┬─────────────────────────────────────┤
-//  │ 控制面板(可调) │                                     │
-//  │  路径查询      │        GraphWidget 绘图区            │
-//  │  网点管理      │                                     │
-//  │  运行日志      │                                     │
-//  │  结果详情      │                                     │
-//  ├───────────────┴─────────────────────────────────────┤
-//  │ 状态栏: 节点:30 | 边:90 | 就绪                       │
-//  └─────────────────────────────────────────────────────┘
-// ============================================================================
 class MainWindow : public QMainWindow {
     Q_OBJECT
 
-private:
-    ExpressManager* mgr;      // 业务逻辑层指针
-    GraphWidget*    graph;    // 绘图控件
-    QSplitter*      splitter; // 分割器（左侧面板 | 右侧绘图区）
-
-    // ---- 控件成员 ----
-    QComboBox*   cmbFrom;   // 起点下拉框
-    QComboBox*   cmbTo;     // 终点下拉框
-    QPushButton* btnPath;   // 工具栏 → 最短路径
-    QPushButton* btnTopo;   // 工具栏 → 批次排班
-    QPushButton* btnOrders; // 工具栏 → 批量订单
-    QLineEdit*   editName;  // 网点管理 → 名称输入
-    QLineEdit*   editX;     // 网点管理 → X 坐标
-    QLineEdit*   editY;     // 网点管理 → Y 坐标
-    QPushButton* btnAdd;    // 网点管理 → 添加按钮
-    QPushButton* btnDel;    // 网点管理 → 删除按钮
-    QTextEdit*   txtLog;    // 日志输出框
-    QTableWidget* tblRes;   // 结果详情表
-    QLabel*      lblStatus; // 状态栏文字标签
-
-    // ---- 构建界面函数 ----
-    void buildToolBar();       // 创建顶部工具栏
-    void buildPanel();         // 创建左侧控制面板
-    void buildStatusBar();     // 创建底部状态栏
-    void loadData();           // 加载 nodes.txt / edges.txt
-    void refreshComboBoxes();  // 刷新起点/终点下拉框列表
-
-    // ---- 日志辅助函数 ----
-    void log(const QString& s);    // 普通日志（灰色文字）
-    void logErr(const QString& s); // 错误日志（红色文字）
-
-    // ---- 槽函数（按钮点击响应） ----
-private slots:
-    void doFindPath();   // 计算最短路径
-    void doTopo();       // 批次排班检测
-    void doOrders();     // 批量处理订单
-    void doAddNode();    // 添加网点
-    void doDelNode();    // 删除网点
-
 public:
-    MainWindow(QWidget* parent = nullptr);
-    ~MainWindow();
-};
+    explicit MainWindow(QWidget* parent = nullptr);
 
-#endif
+private slots:
+    // 页面导航
+    void goMain();
+    void goNode();
+    void goNetwork();
+    void goPath();
+    void goDelivery();
+
+    // 网点管理
+    void onAddNode();
+    void onDeleteNode();
+    void onUpdateNode();
+    void onFindNode();
+    void onListNodes();
+
+    // 路网管理
+    void onAddEdge();
+    void onDeleteEdge();
+    void onListEdges();
+    void onImportNet();
+    void onExportNet();
+
+    // 路径查询
+    void onShortestTime();
+    void onCheapestPath();
+    void onClearHL();
+
+    // 批次配送
+    void onAddOrder();
+    void onDelOrder();
+    void onListOrders();
+    void onImportOrd();
+    void onPlanAll();
+    void onTopoSort();
+    void onExportPlans();
+
+private:
+    // 数据
+    Graph        graph_;
+    OrderManager orders_;
+
+    // 高亮状态
+    DynArray<int> hlNodes_, hlEdgeSrc_, hlEdgeDst_;
+    int srcHL_ = -1, dstHL_ = -1;
+
+    // 控件
+    QStackedWidget* stack_ = nullptr;
+    QLabel*         stats_ = nullptr;
+    QTextEdit*      logBox_ = nullptr;
+    GraphWidget*    canvas_ = nullptr;
+    QLabel*         modeLabel_ = nullptr;
+
+    // 构建函数
+    void buildUI();
+    class QPushButton* makeBtn(const QString& text, bool secondary = false);
+    QWidget* makePage(std::initializer_list<std::pair<QString, void(MainWindow::*)()>> items);
+
+    // 辅助函数
+    void refreshStats();
+    void refreshCanvas();
+    void log(const QString& msg, const QString& color = "#dcdcdc");
+    void logOK(const QString& msg);
+    void logErr(const QString& msg);
+    void applyPathToHL(const DynArray<int>& path);
+    void clearHL();
+};
