@@ -15,13 +15,10 @@
 // ============================================================================
 
 #include "Dijkstra.h"
-#include <limits>
 #include <iostream>
 
-using std::string;
-using std::to_string;
-
-static const double INF = std::numeric_limits<double>::infinity();
+// 用一个极大值代表"无穷远"（25 个节点，边权和不可能超过 1e6）
+static const double INF = 1e18;
 
 // ---- 堆中存储的元素： (距离/费用, 节点编号) ----
 struct DE { double d; int n; };
@@ -30,7 +27,7 @@ struct DECmp { bool operator()(const DE& a, const DE& b) const { return a.d < b.
 // ---- 从 prev 数组回溯重建路径 ----
 // prev[cur] 记录了"到达 cur 的前一个节点是谁"
 // 从 dst 开始沿着 prev 倒推回 src，得到逆序路径，然后翻转
-static DynArray<int> tracePath(const HashMap<int, int>& prev, int dst) {
+static DynArray<int> tracePath(const HashMap<int>& prev, int dst) {
     DynArray<int> p;
     for (int cur = dst; cur != -1; ) {
         p.push_back(cur);
@@ -46,8 +43,8 @@ static DynArray<int> tracePath(const HashMap<int, int>& prev, int dst) {
 
 // ---- 初始化 dist / cost / prev ----
 static void initMaps(const DynArray<int>& ids,
-                     HashMap<int, double>& distA, HashMap<int, double>& distB,
-                     HashMap<int, int>& prev) {
+                     HashMap<double>& distA, HashMap<double>& distB,
+                     HashMap<int>& prev) {
     for (int i = 0; i < ids.size(); ++i) {
         distA[ids[i]] = INF;
         distB[ids[i]] = INF;
@@ -58,16 +55,16 @@ static void initMaps(const DynArray<int>& ids,
 // ================================================================
 // shortestTimeFrom — 单源最短耗时（堆优化）
 // ================================================================
-HashMap<int, PathResult> Dijkstra::shortestTimeFrom(const Graph& g, int src) {
+HashMap<PathResult> Dijkstra::shortestTimeFrom(const Graph& g, int src) {
     if (!g.hasNode(src)) {
         std::cerr << "[错误] Dijkstra 起点 " << src << " 不存在\n";
         return {};
     }
 
     DynArray<int> ids = g.getAllNodeIds();
-    HashMap<int, double> dist;   // 最短耗时
-    HashMap<int, double> cost;   // 对应路径的费用（辅助）
-    HashMap<int, int>    prev;   // 前驱节点
+    HashMap<double> dist;   // 最短耗时
+    HashMap<double> cost;   // 对应路径的费用（辅助）
+    HashMap<int>    prev;   // 前驱节点
     initMaps(ids, dist, cost, prev);
     dist[src] = cost[src] = 0;
 
@@ -95,7 +92,7 @@ HashMap<int, PathResult> Dijkstra::shortestTimeFrom(const Graph& g, int src) {
     }
 
     // 构建返回结果
-    HashMap<int, PathResult> res;
+    HashMap<PathResult> res;
     for (int i = 0; i < ids.size(); ++i) {
         PathResult pr;
         double* dv = dist.find(ids[i]);
@@ -119,9 +116,9 @@ PathResult Dijkstra::cheapestPath(const Graph& g, int src, int dst) {
     }
 
     DynArray<int> ids = g.getAllNodeIds();
-    HashMap<int, double> dist;   // 最低费用（主优化目标）
-    HashMap<int, double> tm;     // 对应路径的耗时（辅助记录）
-    HashMap<int, int>    prev;
+    HashMap<double> dist;   // 最低费用（主优化目标）
+    HashMap<double> tm;     // 对应路径的耗时（辅助记录）
+    HashMap<int>    prev;
     initMaps(ids, dist, tm, prev);
     dist[src] = tm[src] = 0;
 
@@ -163,12 +160,12 @@ TopoResult TopoSort::sort(const Graph& g, const DynArray<int>& ids) {
     if (ids.empty()) return res;
 
     // 1. 建立 ids 子集的快速查找表
-    HashMap<int, bool> inSet;
+    HashMap<bool> inSet;
     for (int i = 0; i < ids.size(); ++i)
         inSet.set(ids[i], true);
 
     // 2. 统计 ids 子集内各节点的入度（只看 ids 内部的边）
-    HashMap<int, int> deg;
+    HashMap<int> deg;
     for (int i = 0; i < ids.size(); ++i) deg[ids[i]] = 0;
     for (int i = 0; i < ids.size(); ++i)
         for (const Edge& e : g.getNeighbors(ids[i]))
@@ -192,7 +189,7 @@ TopoResult TopoSort::sort(const Graph& g, const DynArray<int>& ids) {
     if (res.order.size() < ids.size()) {
         res.hasCycle = true;
         // 入度仍 > 0 的节点就是环中节点
-        HashMap<int, bool> done;
+        HashMap<bool> done;
         for (int i = 0; i < res.order.size(); ++i)
             done.set(res.order[i], true);
         for (int i = 0; i < ids.size(); ++i)

@@ -37,7 +37,7 @@ class Dijkstra {
 public:
     // 单源最短耗时：计算从 src 到所有可达节点的路径
     // 返回 HashMap<节点编号, PathResult>
-    static HashMap<int, PathResult> shortestTimeFrom(const Graph& g, int src);
+    static HashMap<PathResult> shortestTimeFrom(const Graph& g, int src);
 
     // 两点最低费用：计算从 src 到 dst 的费用最优路径
     static PathResult cheapestPath(const Graph& g, int src, int dst);

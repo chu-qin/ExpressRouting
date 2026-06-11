@@ -77,7 +77,7 @@ private:
     const Graph* g_ = nullptr;
 
     // 节点编号 → 屏幕坐标（由 updatePos 根据经纬度计算）
-    HashMap<int, QPointF> pos_;
+    HashMap<QPointF> pos_;
 
     // 高亮状态
     DynArray<int> hlNodes_;      // 高亮节点

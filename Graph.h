@@ -3,8 +3,8 @@
 // Graph.h — 有向加权图（邻接表实现）
 // ============================================================================
 // 存储结构：
-//   nodes: HashMap<int, Node>           — 节点映射（编号 → 节点信息）
-//   adj:   HashMap<int, DynArray<Edge>> — 邻接表（节点 → 出边列表）
+//   nodes: HashMap<Node>               — 节点映射（编号 → 节点信息）
+//   adj:   HashMap<DynArray<Edge>>     — 邻接表（节点 → 出边列表）
 //
 // 为什么用邻接表而不是邻接矩阵？
 //   1. HashMap O(1) 查找节点 / O(degree) 遍历出边
@@ -66,7 +66,7 @@ public:
     void clear();
 
 private:
-    HashMap<int, Node>           nodes_;          // 节点表
-    HashMap<int, DynArray<Edge>> adj_;            // 邻接表
+    HashMap<Node>           nodes_;          // 节点表
+    HashMap<DynArray<Edge>> adj_;            // 邻接表
     static const DynArray<Edge>  emptyNeighbors_;  // 空邻接表（无出边的节点返回它）
 };

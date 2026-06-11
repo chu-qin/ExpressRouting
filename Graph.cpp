@@ -2,8 +2,8 @@
 // Graph.cpp — 有向图邻接表实现
 // ============================================================================
 // 核心数据结构回顾：
-//   nodes_: HashMap<int, Node>           — 所有节点
-//   adj_:   HashMap<int, DynArray<Edge>> — 每个节点的出边列表
+//   nodes_: HashMap<Node>               — 所有节点
+//   adj_:   HashMap<DynArray<Edge>>     — 每个节点的出边列表
 //
 // CRUD 设计要点：
 //   删除节点 → 先删邻接表中的出边 → 遍历所有邻接表删指向该节点的入边 → 删节点
@@ -13,10 +13,6 @@
 
 #include "Graph.h"
 #include <iostream>
-#include <iomanip>
-
-using std::string;
-using std::to_string;
 
 // 静态成员定义：空邻接表，无出边的节点引用此对象
 const DynArray<Edge> Graph::emptyNeighbors_;

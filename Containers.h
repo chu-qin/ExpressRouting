@@ -2,86 +2,105 @@
 // ============================================================================
 // Containers.h — 自实现容器库（替代 STL）
 // ============================================================================
-// 课程红线：禁止使用 STL 容器。本文件实现了四个常用数据结构：
-//   DynArray<T>  — 动态数组（替代 std::vector）
-//   HashMap<K,V> — 哈希表  （替代 std::map / unordered_map）
-//   MinHeap<T>   — 最小堆  （替代 std::priority_queue）
-//   Queue<T>     — 队列    （替代 std::queue）
+// 课程要求：禁止使用 STL。本文件实现四个基础数据结构：
+//   DynArray<T>  — 动态数组
+//   HashMap<V>   — 哈希表（键固定为 int）
+//   MinHeap<T>   — 最小堆
+//   Queue<T>     — 队列
 //
-// 设计思想：
-//   - DynArray  是底层基础，MinHeap 和 Queue 都基于它
-//   - HashMap   使用开放地址法 + 线性探测，支持 int 和 std::string 键
-//   - 所有容器都实现了"三件套"：拷贝构造 / operator= / 析构函数
+// 设计原则：
+//   - 零外部依赖（不 include 任何标准库头文件）
+//   - 不使用 std::move / std::swap（用普通赋值替代）
+//   - 不使用模板元编程（如 if constexpr）
+//   - 代码短小直白，适合初学者阅读
 // ============================================================================
-
-#include <utility>
-#include <string>
 
 // ============================================================================
 // DynArray<T> — 动态数组
 // ============================================================================
-// 核心原理：
-//   堆上分配 T* 数组，元素数达到容量时扩容 2 倍。
-//   均摊 push_back 时间复杂度 O(1)。
+// 原理：在堆上分配 T 数组，满了就扩容 2 倍。
 //
-// 和项目A MyVector 的区别：
-//   - 增加了移动构造和移动赋值（C++11 右值引用）
-//   - operator= 使用 copy-and-swap 惯用法，更安全
-//   - 提供 begin()/end() 接口，支持范围 for 循环
-//   - 提供 erase / remove_first / remove_all 多种删除方式
+// 为什么扩容是 2 倍？
+//   假设从容量 1 开始 push n 次：
+//   扩容时的总拷贝次数 = 1+2+4+...+n/2 ≈ n
+//   → n 次 push 总代价 O(n)，每次均摊 O(1)
+//   如果每次只加固定大小（如 +10），总拷贝会变成 O(n²)
+//
+// 深拷贝 vs 浅拷贝：
+//   如果 T 是 string（内部有指针），直接 memcpy 会导致两个对象
+//   指向同一块内存 → 一个析构后另一个变成野指针 → 程序崩溃
+//   所以必须逐个元素调用赋值运算符（深拷贝）
 // ============================================================================
 template<typename T>
 class DynArray {
     T* _d = nullptr;   // 堆数组指针
-    int _sz = 0;       // 当前元素数
-    int _cap = 0;      // 容量
+    int _sz = 0;       // 当前元素个数
+    int _cap = 0;      // 容量（已分配的内存可放几个）
 
     // 扩容：申请 2 倍空间，拷贝旧数据，释放旧空间
     void grow() {
-        int nc = _cap ? _cap * 2 : 4;
+        int nc = _cap ? _cap * 2 : 4;   // 空数组初始给 4 个位置
         T* nd = new T[nc];
-        for (int i = 0; i < _sz; ++i) nd[i] = std::move(_d[i]);
-        delete[] _d; _d = nd; _cap = nc;
+        for (int i = 0; i < _sz; ++i)
+            nd[i] = _d[i];               // 直接赋值（对 string 是深拷贝）
+        delete[] _d;
+        _d = nd;
+        _cap = nc;
     }
 
 public:
-    // ---- 构造 / 析构 / 赋值 ----
+    // 默认构造：空数组
     DynArray() = default;
 
-    // 拷贝构造：逐元素 push_back，实现深拷贝
-    DynArray(const DynArray& o) { for (int i = 0; i < o._sz; ++i) push_back(o._d[i]); }
+    // 拷贝构造：逐元素 push_back（深拷贝）
+    DynArray(const DynArray& o) {
+        for (int i = 0; i < o._sz; ++i) push_back(o._d[i]);
+    }
 
-    // 移动构造：直接接管资源，源对象置空（noexcept 保证 STL 兼容）
-    DynArray(DynArray&& o) noexcept : _d(o._d), _sz(o._sz), _cap(o._cap)
-        { o._d = nullptr; o._sz = o._cap = 0; }
-
+    // 析构：释放堆内存（delete[] nullptr 是安全的）
     ~DynArray() { delete[] _d; }
 
-    // copy-and-swap 赋值：传值即拷贝，交换即接管，自动处理自赋值
-    DynArray& operator=(DynArray o) noexcept {
-        std::swap(_d, o._d); std::swap(_sz, o._sz); std::swap(_cap, o._cap);
+    // 赋值：先清空自己，再逐元素拷贝
+    DynArray& operator=(const DynArray& o) {
+        if (this == &o) return *this;    // 防止 a = a
+        delete[] _d;
+        _d = nullptr; _sz = _cap = 0;
+        for (int i = 0; i < o._sz; ++i) push_back(o._d[i]);
         return *this;
     }
 
     // ---- 增删 ----
-    void push_back(const T& v)  { if (_sz == _cap) grow(); _d[_sz++] = v; }
-    void push_back(T&& v)       { if (_sz == _cap) grow(); _d[_sz++] = std::move(v); }
-    void pop_back()             { if (_sz > 0) --_sz; }
-
-    // 删除索引 i 处元素，后续元素前移
-    void erase(int i) {
-        for (; i < _sz - 1; ++i) _d[i] = std::move(_d[i + 1]); --_sz;
+    void push_back(const T& v) {
+        if (_sz == _cap) grow();         // 满了先扩容
+        _d[_sz++] = v;
     }
 
-    // 按条件删除第一个匹配元素
-    template<typename P> bool remove_first(P pred) {
-        for (int i = 0; i < _sz; ++i) if (pred(_d[i])) { erase(i); return true; }
+    void pop_back() {
+        if (_sz > 0) --_sz;              // 只减计数，不释放内存
+    }
+
+    // 删除索引 i 处元素，后面的元素全部前移
+    void erase(int i) {
+        for (; i < _sz - 1; ++i)
+            _d[i] = _d[i + 1];           // 后继元素前移
+        --_sz;
+    }
+
+    // 删除第一个满足条件的元素，返回是否成功
+    template<typename P>
+    bool remove_first(P pred) {
+        for (int i = 0; i < _sz; ++i)
+            if (pred(_d[i])) { erase(i); return true; }
         return false;
     }
 
-    // 按条件删除所有匹配元素
-    template<typename P> void remove_all(P pred) {
-        for (int i = 0; i < _sz;) { if (pred(_d[i])) erase(i); else ++i; }
+    // 删除所有满足条件的元素
+    template<typename P>
+    void remove_all(P pred) {
+        for (int i = 0; i < _sz; ) {
+            if (pred(_d[i])) erase(i);   // 删了不 +i（下一个元素移到此位置）
+            else ++i;
+        }
     }
 
     // ---- 访问 ----
@@ -91,9 +110,9 @@ public:
 
     int  size()  const { return _sz; }
     bool empty() const { return _sz == 0; }
-    void clear()       { _sz = 0; }
+    void clear()       { _sz = 0; }     // 只改计数，可快速重用
 
-    // 迭代器接口（支持范围 for）
+    // 迭代器（支持范围 for）
     T* begin()       { return _d; }
     T* end()         { return _d + _sz; }
     const T* begin() const { return _d; }
@@ -101,108 +120,147 @@ public:
 };
 
 // ============================================================================
-// HashMap<K,V> — 开放地址哈希表
+// HashMap<V> — 开放地址哈希表（键固定为 int）
 // ============================================================================
-// 核心原理：
-//   使用开放地址法 + 线性探测解决哈希冲突。
-//   惰性删除：删除时标记 del=true（不真正移除），插入时复用 del 槽。
-//   负载因子 > 0.5 触发 rehash（扩容 2 倍）。
+// 原理：用 int 键 → 算出槽号 → 直接定位，O(1) 均摊。
 //
-// 哈希函数：
-//   int 键：k * 2654435761u % cap（乘法哈希，黄金比例 φ^-1 ≈ 0.618）
-//   string 键：djb2 算法（hash = hash * 33 + c），经典字符串哈希
+// 一、哈希函数：乘法哈希
+//   h(k) = (k × 2654435761) mod 表容量
+//   2654435761 = 2^32 × (√5-1)/2，黄金比例倒数
+//   能把连续整数均匀打散到各个槽
+//   例：k=1→slot 2654435761%16=1, k=2→slot(2*Φ⁻¹)≈slot 8
 //
-// 为什么不用链地址法？
-//   链地址法需要额外的链表节点内存分配。开放地址法内存连续，缓存友好。
+// 二、冲突解决：开放地址法 + 线性探测
+//   如果目标槽被占了 → 看下一个槽 → 还被占再看下一个
+//   就像停车场找车位：首选位置被占了就往下一个找
+//
+// 三、惰性删除：删时不真清，打 del=true 标记
+//   为什么不能直接清空？
+//   例：key=5 → slot3, key=13冲突 → slot4
+//   删了 slot3 → 找 13 时看 slot3 空 → "不存在"（错！13 在 slot4）
+//   用 del 标记 → 找 13 时跳过打了标记的 slot3 → 找到 slot4 ✓
+//
+// 四、负载因子：有效元素数 / 容量 > 0.5 时扩容 2 倍（rehash）
+//   为什么 0.5？开放地址法负载太高探测链会很长
+//   0.5 保证平均探测 ≤ 2 次
 // ============================================================================
-template<typename K, typename V>
+template<typename V>
 class HashMap {
-    struct Slot { K key; V val; bool used = false, del = false; };
-    Slot* _s;     // 槽数组
-    int _cap;      // 容量
-    int _sz;       // 当前有效元素数
+    struct Slot {
+        int  key;
+        V    val;
+        bool used = false;   // 槽是否被占用过
+        bool del  = false;   // 惰性删除标记
+    };
 
-    // ---- 哈希函数 ----
-    unsigned h(int k) const { return (unsigned)k * 2654435761u % (unsigned)_cap; }
-    unsigned h(const std::string& k) const {
-        unsigned r = 5381;
-        for (char c : k) r = r * 33 + (unsigned char)c;
-        return r % (unsigned)_cap;
-    }
-    unsigned slot0(const K& k) const {
-        if constexpr (std::is_same_v<K, int>) return h((int)k);
-        else return h(k);
+    Slot* _s = nullptr;   // 槽数组
+    int   _cap = 0;       // 容量
+    int   _sz = 0;        // 有效元素数（不含 del 的槽）
+
+    // 乘法哈希
+    unsigned h(int k) const {
+        return (unsigned)k * 2654435761u % (unsigned)_cap;
     }
 
-    // 重新哈希到新容量
+    // 扩容到 nc 并重新哈希所有有效元素
     void rehash(int nc) {
-        Slot* old = _s; int oc = _cap;
-        _s = new Slot[nc](); _cap = nc; _sz = 0;
+        Slot* old = _s;
+        int   oc  = _cap;
+        _s   = new Slot[nc]();     // () 让 used/del 全 false
+        _cap = nc;
+        _sz  = 0;
         for (int i = 0; i < oc; ++i)
             if (old[i].used && !old[i].del)
-                (*this)[old[i].key] = std::move(old[i].val);
+                (*this)[old[i].key] = old[i].val;  // 搬到新表
         delete[] old;
     }
 
 public:
-    explicit HashMap(int c = 16) : _s(new Slot[c]()), _cap(c), _sz(0) {}
+    // 构造：默认 16 个槽
+    HashMap(int c = 16) : _s(new Slot[c]()), _cap(c), _sz(0) {}
 
-    // 拷贝构造
-    HashMap(const HashMap& o) : _s(new Slot[o._cap]()), _cap(o._cap), _sz(o._sz)
-        { for (int i = 0; i < _cap; ++i) _s[i] = o._s[i]; }
-
-    // 移动构造
-    HashMap(HashMap&& o) noexcept : _s(o._s), _cap(o._cap), _sz(o._sz)
-        { o._s = nullptr; o._cap = o._sz = 0; }
+    // 拷贝构造：深拷贝整个槽数组
+    HashMap(const HashMap& o)
+        : _s(new Slot[o._cap]()), _cap(o._cap), _sz(o._sz) {
+        for (int i = 0; i < _cap; ++i) _s[i] = o._s[i];
+    }
 
     ~HashMap() { delete[] _s; }
 
-    HashMap& operator=(HashMap o) noexcept {
-        std::swap(_s, o._s); std::swap(_cap, o._cap); std::swap(_sz, o._sz); return *this;
+    // 赋值
+    HashMap& operator=(const HashMap& o) {
+        if (this == &o) return *this;
+        delete[] _s;
+        _s   = new Slot[o._cap]();
+        _cap = o._cap;
+        _sz  = o._sz;
+        for (int i = 0; i < _cap; ++i) _s[i] = o._s[i];
+        return *this;
     }
 
-    // operator[]：查找或插入。负载超 0.5 时自动 rehash
-    V& operator[](const K& k) {
-        if (_sz * 2 >= _cap) rehash(_cap * 2);
-        unsigned i = slot0(k); int fd = -1;
+    // ---- operator[]：最核心的方法 ----
+    // 功能：有则返回引用，无则插入默认值再返回引用
+    // 示例：map[5] = "北京";  // 自动创建 key=5 的槽
+    //        cout << map[5];  // 查找并返回
+    V& operator[](int k) {
+        if (_sz * 2 >= _cap)             // 负载 ≥ 0.5 先扩容
+            rehash(_cap * 2);
+
+        unsigned i = h(k);
+        int fd = -1;                     // 遇到的第一个 del 槽位置
+
         while (_s[i].used) {
-            if (_s[i].del) { if (fd < 0) fd = (int)i; }
-            else if (_s[i].key == k) return _s[i].val;
-            i = (i + 1) % (unsigned)_cap;
+            if (_s[i].del) {
+                if (fd < 0) fd = (int)i; // 记下，可复用
+            } else if (_s[i].key == k) {
+                return _s[i].val;        // 找到了！
+            }
+            i = (i + 1) % (unsigned)_cap; // 往下探测
         }
-        int ins = (fd >= 0) ? fd : (int)i;
-        _s[ins] = { k, V{}, true, false }; ++_sz;
+
+        // 没找到 → 插入新槽
+        int ins = (fd >= 0) ? fd : (int)i;   // 优先复用 del 槽
+        _s[ins] = { k, V{}, true, false };
+        ++_sz;
         return _s[ins].val;
     }
 
-    void set(const K& k, const V& v) { (*this)[k] = v; }
-    void set(const K& k, V&& v)      { (*this)[k] = std::move(v); }
+    // set：设置键值对，比 operator[] 更语义化
+    void set(int k, const V& v) { (*this)[k] = v; }
 
-    // 查找：返回指针，不存在返回 nullptr
-    V* find(const K& k) {
-        unsigned i = slot0(k), s = i;
+    // find：查找，返回值的指针。不存在 → nullptr
+    V* find(int k) {
+        unsigned i = h(k), s = i;
         while (_s[i].used) {
-            if (!_s[i].del && _s[i].key == k) return &_s[i].val;
-            if ((i = (i + 1) % (unsigned)_cap) == s) break;
+            if (!_s[i].del && _s[i].key == k)
+                return &_s[i].val;
+            if ((i = (i + 1) % (unsigned)_cap) == s)
+                break;                   // 绕了一圈，不存在
         }
         return nullptr;
     }
-    const V* find(const K& k) const {
-        unsigned i = slot0(k), s = i;
+    const V* find(int k) const {
+        unsigned i = h(k), s = i;
         while (_s[i].used) {
-            if (!_s[i].del && _s[i].key == k) return &_s[i].val;
-            if ((i = (i + 1) % (unsigned)_cap) == s) break;
+            if (!_s[i].del && _s[i].key == k)
+                return &_s[i].val;
+            if ((i = (i + 1) % (unsigned)_cap) == s)
+                break;
         }
         return nullptr;
     }
 
-    bool contains(const K& k) const { return find(k) != nullptr; }
+    bool contains(int k) const { return find(k) != nullptr; }
 
-    // 惰性删除：标记 del=true，不真正移除槽
-    bool erase(const K& k) {
-        unsigned i = slot0(k), s = i;
+    // erase：惰性删除（只打 del 标记）
+    bool erase(int k) {
+        unsigned i = h(k), s = i;
         while (_s[i].used) {
-            if (!_s[i].del && _s[i].key == k) { _s[i].del = true; --_sz; return true; }
+            if (!_s[i].del && _s[i].key == k) {
+                _s[i].del = true;
+                --_sz;
+                return true;
+            }
             if ((i = (i + 1) % (unsigned)_cap) == s) break;
         }
         return false;
@@ -210,85 +268,110 @@ public:
 
     int  size()  const { return _sz; }
     bool empty() const { return _sz == 0; }
-    void clear() { for (int i = 0; i < _cap; ++i) { _s[i].used = _s[i].del = false; } _sz = 0; }
 
-    // 遍历所有有效元素
-    template<typename F> void forEach(F f) {
-        for (int i = 0; i < _cap; ++i) if (_s[i].used && !_s[i].del) f(_s[i].key, _s[i].val);
+    void clear() {
+        for (int i = 0; i < _cap; ++i)
+            _s[i].used = _s[i].del = false;
+        _sz = 0;
     }
-    template<typename F> void forEach(F f) const {
-        for (int i = 0; i < _cap; ++i) if (_s[i].used && !_s[i].del) f(_s[i].key, _s[i].val);
+
+    // forEach：遍历所有有效元素
+    // 用法：map.forEach([](int key, Node& val) { ... });
+    template<typename F>
+    void forEach(F f) {
+        for (int i = 0; i < _cap; ++i)
+            if (_s[i].used && !_s[i].del)
+                f(_s[i].key, _s[i].val);
+    }
+    template<typename F>
+    void forEach(F f) const {
+        for (int i = 0; i < _cap; ++i)
+            if (_s[i].used && !_s[i].del)
+                f(_s[i].key, _s[i].val);
     }
 };
 
 // ============================================================================
 // MinHeap<T,Cmp> — 二叉最小堆
 // ============================================================================
-// 核心原理：
-//   完全二叉树用数组存储：节点 i 的左孩子=2i+1，右孩子=2i+2，父=(i-1)/2。
-//   push：加到数组末尾 → up(i) 上浮到合适位置
-//   pop ：把末尾元素移到堆顶 → down(0) 下沉
+// 原理：完全二叉树用数组存，父节点 ≤ 子节点。
 //
-// 应用场景：
-//   Dijkstra 堆优化版本中作为优先队列：
-//     - 不实现 decrease-key（太复杂）
-//     - 改用"惰性删除"：push 新记录时旧记录留在堆中，pop 时跳过
-//     - 判断条件：top.d > dist[top.n] → 跳过这条过时记录
+// 索引关系（不用指针，用下标算术）：
+//   节点 i 的左孩子 = 2i + 1
+//   节点 i 的右孩子 = 2i + 2
+//   节点 i 的父节点 = (i-1) / 2
+//
+// push：加到数组末尾 → 和父节点比，小了就交换（上浮）
+// pop ：把末尾元素放到堆顶 → 和孩子中较小的比，大了就交换（下沉）
+//
+// 在 Dijkstra 中做优先队列：
+//   不实现 decrease-key（太难），改用"惰性删除"
+//   → push 新距离时旧距离留在堆里，pop 时跳过过时的记录
 // ============================================================================
 template<typename T>
-struct HeapLess { bool operator()(const T& a, const T& b) const { return a < b; } };
+struct HeapLess {
+    bool operator()(const T& a, const T& b) const { return a < b; }
+};
 
 template<typename T, typename Cmp = HeapLess<T>>
 class MinHeap {
-    DynArray<T> _d;  // 底层动态数组
-    Cmp _c;          // 比较器（默认 operator< = 最小堆）
+    DynArray<T> _d;   // 底层数组（存完全二叉树）
+    Cmp         _c;   // 比较器
 
+    // 上浮：索引 i 的元素和父节点比较
     void up(int i) {
         while (i > 0) {
-            int p = (i - 1) / 2;
-            if (_c(_d[i], _d[p])) { std::swap(_d[i], _d[p]); i = p; }
-            else break;
+            int p = (i - 1) / 2;         // 父节点索引
+            if (_c(_d[i], _d[p])) {      // 孩子 < 父 → 交换
+                T t = _d[i]; _d[i] = _d[p]; _d[p] = t;
+                i = p;
+            } else break;
         }
     }
 
+    // 下沉：索引 i 的元素和左右孩子中较小的比较
     void down(int i) {
         int n = _d.size();
         while (true) {
-            int b = i, l = 2 * i + 1, r = 2 * i + 2;
+            int b = i;                    // 当前最小值的索引
+            int l = 2 * i + 1;            // 左孩子
+            int r = 2 * i + 2;            // 右孩子
             if (l < n && _c(_d[l], _d[b])) b = l;
             if (r < n && _c(_d[r], _d[b])) b = r;
-            if (b == i) break;
-            std::swap(_d[i], _d[b]); i = b;
+            if (b == i) break;            // 已是最小
+            T t = _d[i]; _d[i] = _d[b]; _d[b] = t;
+            i = b;
         }
     }
 
 public:
     bool      empty() const { return _d.empty(); }
     const T&  top()   const { return _d[0]; }
-    void push(const T& v)   { _d.push_back(v); up(_d.size() - 1); }
+
+    void push(const T& v) {
+        _d.push_back(v);
+        up(_d.size() - 1);
+    }
 
     void pop() {
         if (_d.empty()) return;
-        _d[0] = std::move(_d.back());
+        _d[0] = _d.back();          // 末尾元素放堆顶
         _d.pop_back();
-        if (!_d.empty()) down(0);
+        if (!_d.empty()) down(0);   // 下沉
     }
 };
 
 // ============================================================================
-// Queue<T> — 队列（基于 DynArray 的环形缓冲）
+// Queue<T> — 队列
 // ============================================================================
-// 核心原理：
-//   不是真正的环形数组，而是用 head 下标 + DynArray 模拟。
-//   push → 追加到 DynArray 末尾
-//   pop  → head 下标后移，不释放内存
-//   缺点：head 只增不减，长时间使用会浪费前面空间
-//   应用场景：拓扑排序的 BFS 队列（短期使用，无内存浪费问题）
+// 原理：FIFO，队尾进、队头出
+// 用 DynArray 存数据 + head 下标标记队头
+// 缺点：head 只增不减，前面空间不回收（拓扑排序中寿命很短，没关系）
 // ============================================================================
 template<typename T>
 class Queue {
     DynArray<T> _d;
-    int _h = 0;  // 队头下标
+    int _h = 0;
 
 public:
     bool empty() const    { return _h >= _d.size(); }

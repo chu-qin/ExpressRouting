@@ -20,7 +20,6 @@
 #include <sstream>
 
 using std::string;
-using std::to_string;
 
 // ================================================================
 // OrderManager — 订单管理
@@ -91,7 +90,7 @@ DynArray<DeliveryPlan> OrderManager::planAllOrders(const Graph& g) const {
 
 TopoResult OrderManager::planBatchSequence(const Graph& g) const {
     // 收集所有订单涉及的节点编号（去重）
-    HashMap<int, bool> seen;
+    HashMap<bool> seen;
     DynArray<int> ids;
     for (int i = 0; i < orders_.size(); ++i) {
         if (!seen.contains(orders_[i].srcNode)) {
@@ -131,19 +130,30 @@ bool FileManager::loadNetwork(const string& path, Graph& g) {
             continue;
         }
 
-        std::istringstream ss(line);
         if (sec == "N") {
-            int id; string name, addr; double lon, lat;
-            if (ss >> id >> name) {
-                // 地址可能含空格，用 getline 读取剩余部分
-                std::getline(ss, addr);
-                // 去掉前导空格
-                if (!addr.empty() && addr[0] == ' ') addr = addr.substr(1);
-                // 尝试读取坐标（可选）
-                if (!(ss >> lon >> lat)) { lon = 0; lat = 0; }
+            // 格式：编号 名称 地址... 经度 纬度
+            // 地址可能含空格，采用"拆词 + 取头取尾"策略：
+            //   第一个词=编号，第二个词=名称，最后两个词=经纬度
+            //   中间所有词=地址
+            DynArray<string> toks;
+            string t;
+            std::istringstream ss(line);
+            while (ss >> t) toks.push_back(t);
+
+            if (toks.size() >= 4) {
+                int id = std::stoi(toks[0]);
+                string name = toks[1];
+                double lon = std::stod(toks[toks.size() - 2]);
+                double lat = std::stod(toks[toks.size() - 1]);
+                string addr;
+                for (int j = 2; j + 2 < toks.size(); ++j) {
+                    if (j > 2) addr += " ";
+                    addr += toks[j];
+                }
                 if (g.addNode(Node(id, name, addr, lon, lat))) ++nc;
             }
         } else if (sec == "E") {
+            std::istringstream ss(line);
             int f, t; double ti, co;
             if (ss >> f >> t >> ti >> co) {
                 if (g.addEdge(Edge(f, t, ti, co))) ++ec;
