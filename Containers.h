@@ -4,6 +4,8 @@
 // ============================================================================
 // 四个基础数据结构：DynArray / HashMap / MinHeap / Queue
 // 零外部依赖，不使用 std::move / std::swap / if constexpr
+//
+// 注意：成员名避免与 Qt 宏冲突（如 slots 是 Qt 的 #define 宏）
 // ============================================================================
 
 // ============================================================================
@@ -102,46 +104,46 @@ class HashMap {
         int  key;
         V    value;
         bool used    = false;
-        bool deleted = false;
+        bool removed = false;   // 惰性删除标记（原名 deleted，但 MSVC 对 deleted 有解析问题）
     };
 
-    Slot* slots = nullptr;
-    int   cap   = 0;       // 容量
-    int   cnt   = 0;       // 有效元素数
+    Slot* table = nullptr;      // 槽数组（原名 slots，但 slots 是 Qt 宏，冲突）
+    int   cap   = 0;            // 容量
+    int   cnt   = 0;            // 有效元素数
 
     unsigned hashIndex(int k) const {
         return (unsigned)k * 2654435761u % (unsigned)cap;
     }
 
     void rebuild(int newCap) {
-        Slot* oldSlots = slots;
+        Slot* oldTable = table;
         int   oldCap   = cap;
-        slots = new Slot[newCap]();
+        table = new Slot[newCap]();
         cap   = newCap;
         cnt   = 0;
         for (int i = 0; i < oldCap; ++i)
-            if (oldSlots[i].used && !oldSlots[i].deleted)
-                (*this)[oldSlots[i].key] = oldSlots[i].value;
-        delete[] oldSlots;
+            if (oldTable[i].used && !oldTable[i].removed)
+                (*this)[oldTable[i].key] = oldTable[i].value;
+        delete[] oldTable;
     }
 
 public:
-    HashMap(int initCap = 16) : slots(new Slot[initCap]()), cap(initCap), cnt(0) {}
+    HashMap(int initCap = 16) : table(new Slot[initCap]()), cap(initCap), cnt(0) {}
 
     HashMap(const HashMap& other)
-        : slots(new Slot[other.cap]()), cap(other.cap), cnt(other.cnt) {
-        for (int i = 0; i < cap; ++i) slots[i] = other.slots[i];
+        : table(new Slot[other.cap]()), cap(other.cap), cnt(other.cnt) {
+        for (int i = 0; i < cap; ++i) table[i] = other.table[i];
     }
 
-    ~HashMap() { delete[] slots; }
+    ~HashMap() { delete[] table; }
 
     HashMap& operator=(const HashMap& other) {
         if (this == &other) return *this;
-        delete[] slots;
-        slots = new Slot[other.cap]();
+        delete[] table;
+        table = new Slot[other.cap]();
         cap   = other.cap;
         cnt   = other.cnt;
-        for (int i = 0; i < cap; ++i) slots[i] = other.slots[i];
+        for (int i = 0; i < cap; ++i) table[i] = other.table[i];
         return *this;
     }
 
@@ -152,37 +154,37 @@ public:
         unsigned i = hashIndex(k);
         int firstDel = -1;
 
-        while (slots[i].used) {
-            if (slots[i].deleted) {
+        while (table[i].used) {
+            if (table[i].removed) {
                 if (firstDel < 0) firstDel = (int)i;
-            } else if (slots[i].key == k) {
-                return slots[i].value;
+            } else if (table[i].key == k) {
+                return table[i].value;
             }
             i = (i + 1) % (unsigned)cap;
         }
 
         int dest = (firstDel >= 0) ? firstDel : (int)i;
-        slots[dest] = { k, V{}, true, false };
+        table[dest] = { k, V{}, true, false };
         ++cnt;
-        return slots[dest].value;
+        return table[dest].value;
     }
 
     void set(int k, const V& v) { (*this)[k] = v; }
 
     V* find(int k) {
         unsigned i = hashIndex(k), start = i;
-        while (slots[i].used) {
-            if (!slots[i].deleted && slots[i].key == k)
-                return &slots[i].value;
+        while (table[i].used) {
+            if (!table[i].removed && table[i].key == k)
+                return &table[i].value;
             if ((i = (i + 1) % (unsigned)cap) == start) break;
         }
         return nullptr;
     }
     const V* find(int k) const {
         unsigned i = hashIndex(k), start = i;
-        while (slots[i].used) {
-            if (!slots[i].deleted && slots[i].key == k)
-                return &slots[i].value;
+        while (table[i].used) {
+            if (!table[i].removed && table[i].key == k)
+                return &table[i].value;
             if ((i = (i + 1) % (unsigned)cap) == start) break;
         }
         return nullptr;
@@ -192,9 +194,9 @@ public:
 
     bool erase(int k) {
         unsigned i = hashIndex(k), start = i;
-        while (slots[i].used) {
-            if (!slots[i].deleted && slots[i].key == k) {
-                slots[i].deleted = true;
+        while (table[i].used) {
+            if (!table[i].removed && table[i].key == k) {
+                table[i].removed = true;
                 --cnt;
                 return true;
             }
@@ -208,21 +210,21 @@ public:
 
     void clear() {
         for (int i = 0; i < cap; ++i)
-            slots[i].used = slots[i].deleted = false;
+            table[i].used = table[i].removed = false;
         cnt = 0;
     }
 
     template<typename F>
     void forEach(F f) {
         for (int i = 0; i < cap; ++i)
-            if (slots[i].used && !slots[i].deleted)
-                f(slots[i].key, slots[i].value);
+            if (table[i].used && !table[i].removed)
+                f(table[i].key, table[i].value);
     }
     template<typename F>
     void forEach(F f) const {
         for (int i = 0; i < cap; ++i)
-            if (slots[i].used && !slots[i].deleted)
-                f(slots[i].key, slots[i].value);
+            if (table[i].used && !table[i].removed)
+                f(table[i].key, table[i].value);
     }
 };
 
