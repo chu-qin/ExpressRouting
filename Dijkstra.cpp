@@ -1,185 +1,230 @@
 // ============================================================================
-// Dijkstra.cpp — 最短路径算法 + 拓扑排序 实现
+// Dijkstra.cpp —— 最短路径 + 拓扑排序 实现
+// ============================================================================
+// 算法选择：
+//   最短路径：朴素 Dijkstra O(V²)
+//     每次手动扫描所有节点，找出"距离最小且未访问"的那个
+//     25个节点只需 625 次比较，无需堆优化
+//   拓扑排序：Kahn 算法（BFS + 入度）
+//     用 DynArray + head 下标模拟队列，不需额外 Queue 类
 // ============================================================================
 
 #include "Dijkstra.h"
 #include <iostream>
 
-// 极大值代表"无穷远"
-static const double INF = 1e18;
+static const double INF = 1e18;     // 代表"无穷远"
 
-// ---- 堆元素：(距离/费用, 节点编号) ----
-struct HeapItem { double dist; int node; };
-struct HeapItemCmp { bool operator()(const HeapItem& a, const HeapItem& b) const { return a.dist < b.dist; } };
-
-// ---- 从 prev 回溯重建路径 ----
-static DynArray<int> rebuildPath(const HashMap<int>& prev, int target) {
+// ---- 从 prev 数组回溯路径 ----
+static DynArray<int> rebuildPath(const DynArray<int>& prev, int target) {
     DynArray<int> path;
-    for (int cur = target; cur != -1; ) {
+    for (int cur = target; cur != -1; cur = prev[cur])
         path.push_back(cur);
-        const int* pp = prev.find(cur);
-        cur = pp ? *pp : -1;
-    }
-    // 翻转：[终点, ..., 起点] → [起点, ..., 终点]
+
+    // 翻转：[终点,...,起点] → [起点,...,终点]
     for (int l = 0, r = path.size() - 1; l < r; ++l, --r) {
-        int temp = path[l]; path[l] = path[r]; path[r] = temp;
+        int tmp   = path[l];
+        path[l]   = path[r];
+        path[r]   = tmp;
     }
     return path;
 }
 
-// ---- 初始化 dist / aux / prev ----
-static void initMaps(const DynArray<int>& ids,
-                     HashMap<double>& dist, HashMap<double>& aux,
-                     HashMap<int>& prev) {
-    for (int i = 0; i < ids.size(); ++i) {
-        dist[ids[i]] = INF;
-        aux[ids[i]] = INF;
-        prev[ids[i]] = -1;
-    }
-}
+// ================================================================
+// shortestTime —— 单源最短耗时（朴素 O(V²) Dijkstra）
+// ================================================================
+DynArray<PathResult> Dijkstra::shortestTime(const Graph& graph, int start) {
+    int N = graph.maxNodeId();               // N = 最大编号+1（即 nodes.size()）
+    DynArray<double> minTime;                // 最短耗时
+    DynArray<double> minCost;                // 对应费用
+    DynArray<int>    prev;                   // 前驱节点
+    DynArray<int>    visited;                // 是否已确定最短路径
 
-// ================================================================
-// shortestTimeFrom — 单源最短耗时
-// ================================================================
-HashMap<PathResult> Dijkstra::shortestTimeFrom(const Graph& graph, int start) {
+    // 初始化
+    for (int i = 0; i < N; ++i) {
+        minTime.push_back(INF);
+        minCost.push_back(INF);
+        prev.push_back(-1);
+        visited.push_back(0);
+    }
+
     if (!graph.hasNode(start)) {
-        std::cerr << "[错误] Dijkstra 起点 " << start << " 不存在\n";
-        return {};
+        std::cerr << "[错误] Dijkstra：起点 " << start << " 不存在\n";
+        DynArray<PathResult> empty;
+        return empty;
     }
 
-    DynArray<int> ids = graph.getAllNodeIds();
-    HashMap<double> minTime;    // 最短耗时
-    HashMap<double> minCost;    // 对应费用
-    HashMap<int>    prev;
-    initMaps(ids, minTime, minCost, prev);
-    minTime[start] = minCost[start] = 0;
+    minTime[start] = 0;
+    minCost[start] = 0;
 
-    MinHeap<HeapItem, HeapItemCmp> heap;
-    heap.push({ 0.0, start });
+    // 主循环：每次确定一个节点的最短路径
+    for (int round = 0; round < N; ++round) {
+        // 第1步：在所有未确定节点中，找距离最小的
+        int    cur  = -1;
+        double best = INF;
+        for (int j = 0; j < N; ++j) {
+            if (!visited[j] && graph.hasNode(j) && minTime[j] < best) {
+                best = minTime[j];
+                cur  = j;
+            }
+        }
 
-    while (!heap.empty()) {
-        HeapItem cur = heap.top(); heap.pop();
+        if (cur == -1) break;   // 所有剩余节点都不可达
 
-        // 惰性删除：堆顶距离 > 已知最短 → 过时记录
-        double* curDist = minTime.find(cur.node);
-        if (!curDist || cur.dist > *curDist) continue;
+        visited[cur] = 1;
 
-        // 松弛邻居
-        for (const Edge& edge : graph.getNeighbors(cur.node)) {
-            double newDist = *curDist + edge.time;
-            double* oldDist = minTime.find(edge.to);
-            if (oldDist && newDist < *oldDist) {
-                *oldDist = newDist;
-                *minCost.find(edge.to) = *minCost.find(cur.node) + edge.cost;
-                prev[edge.to] = cur.node;
-                heap.push({ newDist, edge.to });
+        // 第2步：用 cur 去松弛它的所有邻居
+        const DynArray<Edge>& edges = graph.getNeighbors(cur);
+        for (int j = 0; j < edges.size(); ++j) {
+            const Edge& e   = edges[j];
+            double newTime  = minTime[cur] + e.time;
+            if (newTime < minTime[e.to]) {
+                minTime[e.to] = newTime;
+                minCost[e.to] = minCost[cur] + e.cost;
+                prev[e.to]    = cur;
             }
         }
     }
 
     // 构建结果
-    HashMap<PathResult> result;
-    for (int i = 0; i < ids.size(); ++i) {
+    DynArray<PathResult> results;
+    for (int i = 0; i < N; ++i) {
         PathResult pr;
-        double* d = minTime.find(ids[i]);
-        if ((pr.reachable = (d && *d != INF))) {
-            pr.totalTime = *d;
-            pr.totalCost = *minCost.find(ids[i]);
-            pr.path = rebuildPath(prev, ids[i]);
+        if (graph.hasNode(i) && minTime[i] != INF) {
+            pr.reachable  = true;
+            pr.totalTime  = minTime[i];
+            pr.totalCost  = minCost[i];
+            pr.path       = rebuildPath(prev, i);
         }
-        result.set(ids[i], pr);
+        results.push_back(pr);
     }
-    return result;
+    return results;
 }
 
 // ================================================================
-// cheapestPath — 两点最低费用
+// cheapestPath —— 两点最低费用（朴素 O(V²) Dijkstra，以 cost 为权）
 // ================================================================
 PathResult Dijkstra::cheapestPath(const Graph& graph, int start, int target) {
-    if (!graph.hasNode(start) || !graph.hasNode(target)) {
-        std::cerr << "[错误] cheapestPath：节点不存在\n";
-        return {};
+    int N = graph.maxNodeId();
+    DynArray<double> dist;
+    DynArray<double> totalTime;
+    DynArray<int>    prev;
+    DynArray<int>    visited;
+
+    for (int i = 0; i < N; ++i) {
+        dist.push_back(INF);
+        totalTime.push_back(INF);
+        prev.push_back(-1);
+        visited.push_back(0);
     }
 
-    DynArray<int> ids = graph.getAllNodeIds();
-    HashMap<double> minCost;    // 最低费用
-    HashMap<double> totalTime;  // 对应耗时
-    HashMap<int>    prev;
-    initMaps(ids, minCost, totalTime, prev);
-    minCost[start] = totalTime[start] = 0;
+    if (!graph.hasNode(start) || !graph.hasNode(target)) {
+        std::cerr << "[错误] cheapestPath：节点不存在\n";
+        return PathResult();
+    }
 
-    MinHeap<HeapItem, HeapItemCmp> heap;
-    heap.push({ 0.0, start });
+    dist[start]      = 0;
+    totalTime[start] = 0;
 
-    while (!heap.empty()) {
-        HeapItem cur = heap.top(); heap.pop();
-        double* curDist = minCost.find(cur.node);
-        if (!curDist || cur.dist > *curDist) continue;
+    for (int round = 0; round < N; ++round) {
+        int    cur  = -1;
+        double best = INF;
+        for (int j = 0; j < N; ++j) {
+            if (!visited[j] && graph.hasNode(j) && dist[j] < best) {
+                best = dist[j];
+                cur  = j;
+            }
+        }
 
-        for (const Edge& edge : graph.getNeighbors(cur.node)) {
-            double newDist = *curDist + edge.cost;
-            double* oldDist = minCost.find(edge.to);
-            if (oldDist && newDist < *oldDist) {
-                *oldDist = newDist;
-                *totalTime.find(edge.to) = *totalTime.find(cur.node) + edge.time;
-                prev[edge.to] = cur.node;
-                heap.push({ newDist, edge.to });
+        if (cur == -1 || cur == target) break;
+
+        visited[cur] = 1;
+
+        const DynArray<Edge>& edges = graph.getNeighbors(cur);
+        for (int j = 0; j < edges.size(); ++j) {
+            const Edge& e  = edges[j];
+            double newCost  = dist[cur] + e.cost;
+            if (newCost < dist[e.to]) {
+                dist[e.to]      = newCost;
+                totalTime[e.to] = totalTime[cur] + e.time;
+                prev[e.to]      = cur;
             }
         }
     }
 
     PathResult pr;
-    double* d = minCost.find(target);
-    if ((pr.reachable = (d && *d != INF))) {
-        pr.totalCost = *d;
-        pr.totalTime = *totalTime.find(target);
-        pr.path = rebuildPath(prev, target);
+    if (dist[target] != INF) {
+        pr.reachable  = true;
+        pr.totalTime  = totalTime[target];
+        pr.totalCost  = dist[target];
+        pr.path       = rebuildPath(prev, target);
     }
     return pr;
 }
 
 // ================================================================
-// TopoSort::sort — Kahn 拓扑排序
+// TopoSort::sort —— Kahn 拓扑排序（子集版）
 // ================================================================
 TopoResult TopoSort::sort(const Graph& graph, const DynArray<int>& nodeIds) {
     TopoResult result;
     if (nodeIds.empty()) return result;
 
-    // 1. 建立子集查找表
-    HashMap<bool> inSubSet;
-    for (int i = 0; i < nodeIds.size(); ++i)
-        inSubSet.set(nodeIds[i], true);
+    int N = graph.maxNodeId();
 
-    // 2. 统计子集内入度
-    HashMap<int> ruDu;    // 入度（拼音更直观）
-    for (int i = 0; i < nodeIds.size(); ++i) ruDu[nodeIds[i]] = 0;
+    // 1. 建立子集标记表：inSet[id] = 1 表示 id 在子集中
+    DynArray<int> inSet;
+    for (int i = 0; i < N; ++i) inSet.push_back(0);
     for (int i = 0; i < nodeIds.size(); ++i)
-        for (const Edge& edge : graph.getNeighbors(nodeIds[i]))
-            if (inSubSet.contains(edge.to)) ++ruDu[edge.to];
+        inSet[nodeIds[i]] = 1;
 
-    // 3. 入度为 0 的入队
-    Queue<int> queue;
-    for (int i = 0; i < nodeIds.size(); ++i)
-        if (ruDu[nodeIds[i]] == 0) queue.push(nodeIds[i]);
-
-    // 4. BFS
-    while (!queue.empty()) {
-        int node = queue.front(); queue.pop();
-        result.order.push_back(node);
-        for (const Edge& edge : graph.getNeighbors(node))
-            if (inSubSet.contains(edge.to) && --ruDu[edge.to] == 0)
-                queue.push(edge.to);
+    // 2. 统计子集内每个节点的入度
+    DynArray<int> ruDu;    // 入度
+    for (int i = 0; i < N; ++i) ruDu.push_back(0);
+    for (int i = 0; i < nodeIds.size(); ++i) {
+        int u = nodeIds[i];
+        const DynArray<Edge>& edges = graph.getNeighbors(u);
+        for (int j = 0; j < edges.size(); ++j) {
+            int v = edges[j].to;
+            if (inSet[v]) ruDu[v]++;
+        }
     }
 
-    // 5. 判环
-    if (result.order.size() < nodeIds.size()) {
+    // 3. 入度为 0 的入队（用 DynArray + head 模拟队列）
+    DynArray<int> queue;
+    int head = 0;
+    for (int i = 0; i < nodeIds.size(); ++i) {
+        int u = nodeIds[i];
+        if (ruDu[u] == 0) queue.push_back(u);
+    }
+
+    // 4. BFS
+    while (head < queue.size()) {
+        int u = queue[head++];
+        result.order.push_back(u);
+
+        const DynArray<Edge>& edges = graph.getNeighbors(u);
+        for (int j = 0; j < edges.size(); ++j) {
+            int v = edges[j].to;
+            if (inSet[v]) {
+                ruDu[v]--;
+                if (ruDu[v] == 0) queue.push_back(v);
+            }
+        }
+    }
+
+    // 5. 判环：如果排出的节点数少于子集大小，说明有环
+    if (result.order.size() < (int)nodeIds.size()) {
         result.hasCycle = true;
-        HashMap<bool> sorted;
+
+        // 找出哪些节点在环中（不在 order 里的就是）
+        DynArray<int> sorted;
+        for (int i = 0; i < N; ++i) sorted.push_back(0);
         for (int i = 0; i < result.order.size(); ++i)
-            sorted.set(result.order[i], true);
-        for (int i = 0; i < nodeIds.size(); ++i)
-            if (!sorted.contains(nodeIds[i]))
-                result.cycleNodes.push_back(nodeIds[i]);
+            sorted[result.order[i]] = 1;
+
+        for (int i = 0; i < nodeIds.size(); ++i) {
+            int u = nodeIds[i];
+            if (!sorted[u]) result.cycleNodes.push_back(u);
+        }
     }
     return result;
 }

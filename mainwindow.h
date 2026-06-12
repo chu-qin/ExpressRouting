@@ -1,20 +1,23 @@
 #pragma once
 // ============================================================================
-// MainWindow.h — Qt 图形界面
+// mainwindow.h —— 图形界面
 // ============================================================================
 
 #include <QMainWindow>
 #include <QWidget>
 #include <QTextEdit>
 #include <QLabel>
-#include <QStackedWidget>
+#include <QSplitter>
+#include <QComboBox>
 #include <QPointF>
+#include <QPainter>
+#include <QColor>
+#include <QPushButton>
 
-#include "Graph.h"
 #include "OrderManager.h"
 
 // ============================================================================
-// GraphWidget — 路网画布（交互式）
+// GraphWidget —— 路网画布
 // ============================================================================
 class GraphWidget : public QWidget {
     Q_OBJECT
@@ -22,47 +25,46 @@ class GraphWidget : public QWidget {
 public:
     explicit GraphWidget(QWidget* parent = nullptr);
 
-    void setGraph(const Graph* graph);
-    void setHighlight(const DynArray<int>& nodeList, const DynArray<int>& edgeSrcList,
-                      const DynArray<int>& edgeDstList, int start, int target);
+    void setGraph(const Graph* g);
+    void highlightPath(const DynArray<int>& path);
     void clearHighlight();
 
 signals:
-    void nodeHovered(int id);
+    void nodeHovered(int id, const QString& info);
     void nodeClicked(int id);
 
 protected:
-    void paintEvent(QPaintEvent*) override;
+    void paintEvent(QPaintEvent*)   override;
     void mouseMoveEvent(QMouseEvent*) override;
     void mousePressEvent(QMouseEvent*) override;
     void resizeEvent(QResizeEvent*) override;
 
 private:
-    const Graph* graphPtr = nullptr;
+    const Graph* graph = nullptr;
 
-    // 节点编号 → 屏幕坐标
-    HashMap<QPointF> nodePos;
+    // 节点 → 屏幕坐标
+    DynArray<QPointF> nodePos;
+    float radius = 22.0f;      // 节点圆半径（加大，便于看清）
 
     // 高亮状态
-    DynArray<int> hlNodes;       // 高亮节点
-    DynArray<int> hlEdgeSrc;     // 高亮边起点
-    DynArray<int> hlEdgeDst;     // 高亮边终点
-    int startHL = -1;             // 起点（绿色）
-    int targetHL = -1;            // 终点（红色）
-    int hoverNode = -1;           // 当前悬停节点
+    DynArray<int> hlNodes;       // 高亮节点列表
+    DynArray<int> hlEdges;       // 高亮边列表（边编号 = from*10000+to）
+    int startHL   = -1;
+    int targetHL  = -1;
+    int hoverNode = -1;
 
-    static constexpr float nodeRadius = 18.0f;
-
-    void updatePositions();
+    void recalcPositions();
+    int  nodeAtPos(QPointF pt) const;
     bool isNodeHL(int id) const;
     bool isEdgeHL(int from, int to) const;
-    int  nodeAt(QPoint screenPt) const;
-    void drawEdge(class QPainter& painter, QPointF fromPt, QPointF toPt, QColor color, float width, bool isBidir);
-    void drawNode(class QPainter& painter, int id, QPointF pos, QColor color);
+
+    void drawEdge(QPainter& p, QPointF a, QPointF b,
+                  QColor color, float width, double time, double cost);
+    void drawNode(QPainter& p, int id, QPointF pos, QColor color);
 };
 
 // ============================================================================
-// MainWindow — 主窗口
+// MainWindow —— 主窗口
 // ============================================================================
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -71,68 +73,58 @@ public:
     explicit MainWindow(QWidget* parent = nullptr);
 
 private slots:
-    // 页面导航
-    void goMain();
-    void goNodePage();
-    void goNetworkPage();
-    void goPathPage();
-    void goDeliveryPage();
-
     // 网点管理
     void onAddNode();
     void onDeleteNode();
     void onUpdateNode();
     void onFindNode();
-    void onListNodes();
 
     // 路网管理
     void onAddEdge();
     void onDeleteEdge();
-    void onListEdges();
-    void onImportNet();
-    void onExportNet();
+    void onImportNetwork();
+    void onExportNetwork();
 
     // 路径查询
     void onShortestTime();
     void onCheapestPath();
-    void onClearHL();
+    void onClearHighlight();
 
-    // 批次配送
+    // 订单管理
     void onAddOrder();
-    void onDelOrder();
-    void onListOrders();
-    void onImportOrd();
+    void onDeleteOrder();
     void onPlanAll();
     void onTopoSort();
+    void onImportOrders();
     void onExportPlans();
 
 private:
-    // 数据
-    Graph        graph;
-    OrderManager orderMgr;
+    // ---- 数据 ----
+    Graph         graph;
+    OrderManager  orders;
 
-    // 高亮
-    DynArray<int> hlNodes, hlEdgeSrc, hlEdgeDst;
-    int startHL = -1, targetHL = -1;
+    // ---- 控件 ----
+    QSplitter*   splitter   = nullptr;
+    QWidget*     leftPanel  = nullptr;
+    GraphWidget* canvas     = nullptr;
+    QTextEdit*   logBox     = nullptr;
+    QLabel*      statusLabel = nullptr;
+    QComboBox*   srcCombo   = nullptr;
+    QComboBox*   dstCombo   = nullptr;
 
-    // 控件
-    QStackedWidget* pageStack = nullptr;
-    QLabel*         statsLabel = nullptr;
-    QTextEdit*      logBox = nullptr;
-    GraphWidget*    canvas = nullptr;
-    QLabel*         modeLabel = nullptr;
-
-    // 构建
-    void buildUI();
-    class QPushButton* makeBtn(const QString& text, bool secondary = false);
-    QWidget* makePage(std::initializer_list<std::pair<QString, void(MainWindow::*)()>> items);
-
-    // 辅助
-    void refreshStats();
+    // ---- 辅助 ----
+    void setupUI();
+    void applyStyle();
+    void refreshCombo();
     void refreshCanvas();
-    void log(const QString& msg, const QString& color = "#dcdcdc");
+    void refreshStatus();
+
+    void log(const QString& msg, const QString& color = "#c8c8c8");
     void logOK(const QString& msg);
     void logErr(const QString& msg);
-    void applyPathToHL(const DynArray<int>& path);
-    void clearHL();
+
+    void applyPathHighlight(const PathResult& pr);
+
+    // 创建按钮的快捷函数
+    QPushButton* btn(const QString& text, QWidget* parent);
 };

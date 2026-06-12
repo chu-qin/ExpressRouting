@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(ExpressRouting VERSION 1.0 LANGUAGES CXX)
+project(highway_network_planning VERSION 0.1 LANGUAGES CXX)
 
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTOMOC ON)
@@ -14,36 +14,54 @@ find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets)
 
 set(PROJECT_SOURCES
     main.cpp
-    MainWindow.cpp
-    MainWindow.h
+    mainwindow.cpp
+    mainwindow.h
     Graph.cpp
     Graph.h
     Dijkstra.cpp
     Dijkstra.h
     OrderManager.cpp
     OrderManager.h
-    Containers.h
+    DynArray.h
 )
 
 if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
-    qt_add_executable(ExpressRouting
+    qt_add_executable(highway_network_planning
         MANUAL_FINALIZATION
         ${PROJECT_SOURCES}
     )
 else()
-    add_executable(ExpressRouting ${PROJECT_SOURCES})
+    if(ANDROID)
+        add_library(highway_network_planning SHARED
+            ${PROJECT_SOURCES}
+        )
+    else()
+        add_executable(highway_network_planning
+            ${PROJECT_SOURCES}
+        )
+    endif()
 endif()
 
-target_include_directories(ExpressRouting PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(ExpressRouting PRIVATE Qt${QT_VERSION_MAJOR}::Widgets)
+target_link_libraries(highway_network_planning PRIVATE Qt${QT_VERSION_MAJOR}::Widgets)
 
-# 将 data/ 目录复制到编译输出目录
-add_custom_command(TARGET ExpressRouting POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        ${CMAKE_CURRENT_SOURCE_DIR}/data
-        $<TARGET_FILE_DIR:ExpressRouting>/data
+if(${QT_VERSION} VERSION_LESS 6.1.0)
+  set(BUNDLE_ID_OPTION MACOSX_BUNDLE_GUI_IDENTIFIER com.example.highway_network_planning)
+endif()
+set_target_properties(highway_network_planning PROPERTIES
+    ${BUNDLE_ID_OPTION}
+    MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION}
+    MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}
+    MACOSX_BUNDLE TRUE
+    WIN32_EXECUTABLE TRUE
+)
+
+include(GNUInstallDirs)
+install(TARGETS highway_network_planning
+    BUNDLE DESTINATION .
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
 if(QT_VERSION_MAJOR EQUAL 6)
-    qt_finalize_executable(ExpressRouting)
+    qt_finalize_executable(highway_network_planning)
 endif()
